@@ -21,9 +21,7 @@ logger = logging.getLogger(__name__)
 # Official NASA Prognostics Center of Excellence (PCoE) download, linked from
 # https://www.nasa.gov/intelligent-systems-division/discovery-and-systems-health/pcoe/pcoe-data-set-repository/
 # ("6. Turbofan Engine Degradation Simulation Data Set").
-DATASET_URL = (
-    "https://phm-datasets.s3.amazonaws.com/NASA/6.+Turbofan+Engine+Degradation+Simulation+Data+Set.zip"
-)
+DATASET_URL = "https://phm-datasets.s3.amazonaws.com/NASA/6.+Turbofan+Engine+Degradation+Simulation+Data+Set.zip"
 
 # SHA-256 of the archive above, computed from a verified download on 2026-11-10
 # (12,429,152 bytes, Last-Modified 2022-09-18).

@@ -9,10 +9,10 @@ dist/
 build/
 
 # Data and ML artifacts (reproduced by scripts, never committed)
-data/
-mlruns/
-mlartifacts/
-models/
+/data/
+/mlruns/
+/mlartifacts/
+/models/
 
 # Secrets and local config
 .env
