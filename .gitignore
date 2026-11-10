@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Data and ML artifacts (reproduced by scripts, never committed)
+data/
+mlruns/
+mlartifacts/
+models/
+
+# Secrets and local config
+.env
+
+# Editors and OS
+.DS_Store
+.vscode/
+.ipynb_checkpoints/
