@@ -16,11 +16,16 @@ simulated C-MAPSS dataset ([dataset documentation](docs/dataset.md)).
 - [x] CI on GitHub Actions (lint, format check, tests)
 - [x] Reproducible data download with SHA-256 checksum verification
 - [x] Dataset documentation ([docs/dataset.md](docs/dataset.md))
+- [x] **Milestone 1: data understanding (FD001)**
+  - Data loader with RUL labels (`predmaint.data.load`)
+  - Exploratory analysis ([notebooks/01_eda_fd001.ipynb](notebooks/01_eda_fd001.ipynb))
+  - RUL cap and sensor selection
+    ([ADR 0001](docs/adr/0001-rul-cap-and-sensor-selection.md))
+  - Frozen evaluation protocol ([docs/evaluation.md](docs/evaluation.md))
 
 **Next**
 
-- [ ] Data loading and exploratory analysis
-- [ ] RUL estimation: baselines and evaluation
+- [ ] RUL estimation: baselines (mean RUL, linear regression), then stronger models
 - [ ] Failure prediction
 - [ ] Anomaly detection
 
