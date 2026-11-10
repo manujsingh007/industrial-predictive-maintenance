@@ -1,1 +1,4 @@
-"""Predictive maintenance for turbofan engines: RUL estimation, failure prediction, anomaly detection."""
+"""Predictive maintenance for turbofan engines.
+
+Covers remaining-useful-life estimation, failure prediction and anomaly detection.
+"""
