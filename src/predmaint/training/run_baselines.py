@@ -27,8 +27,17 @@ def main() -> None:
         choices=SUBSETS_WITH_ADR,
         help="training subset (only subsets covered by an ADR)",
     )
-    parser.add_argument("--cap", type=float, default=DEFAULT_RUL_CAP, help="training RUL cap")
+    parser.add_argument(
+        "--cap", type=int, default=DEFAULT_RUL_CAP, help="training RUL cap (cycles)"
+    )
+    parser.add_argument(
+        "--no-mlflow", action="store_true", help="do not log runs to MLflow (quick runs)"
+    )
     args = parser.parse_args()
+
+    if not args.no_mlflow:
+        # Imported only when needed: MLflow is slow to import, and quick runs skip it.
+        from predmaint.tracking import TRACKING_URI, log_cv_result
 
     train = add_rul(load_train(args.subset))
 
@@ -39,6 +48,8 @@ def main() -> None:
         f"<= {MAX_EVAL_RUL}\n"
     )
     header = f"{'model':<20} {'RMSE (mean ± std)':>18} {'MAE (mean ± std)':>18}"
+    if not args.no_mlflow:
+        header += "  mlflow run id"
     print(header)
     print("-" * len(header))
     for name, factory in BASELINES.items():
@@ -46,8 +57,13 @@ def main() -> None:
         s = result.summary()
         rmse_text = f"{s.loc['mean', 'rmse']:.2f} ± {s.loc['std', 'rmse']:.2f}"
         mae_text = f"{s.loc['mean', 'mae']:.2f} ± {s.loc['std', 'mae']:.2f}"
-        print(f"{name:<20} {rmse_text:>18} {mae_text:>18}")
+        line = f"{name:<20} {rmse_text:>18} {mae_text:>18}"
+        if not args.no_mlflow:
+            line += "  " + log_cv_result(result, model_name=name, subset=args.subset)
+        print(line)
     print("\nstd = sample standard deviation across folds; units are cycles.")
+    if not args.no_mlflow:
+        print(f"Logged to MLflow: {TRACKING_URI}")
 
 
 if __name__ == "__main__":

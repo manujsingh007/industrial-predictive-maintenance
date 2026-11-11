@@ -21,10 +21,20 @@ class CVResult:
         folds: One row per fold: ``fold``, ``n_val_engines``, ``n_val_rows_scored``,
             ``rmse``, ``mae``.
         models: The fitted model of each fold, in fold order.
+        cap: RUL cap used for the training target.
+        n_splits: Number of engine folds.
+        seed: Fold shuffling seed.
+        features: Feature columns given to the model.
+        max_eval_rul: Largest true RUL that was scored.
     """
 
     folds: pd.DataFrame
     models: list[RegressorMixin]
+    cap: float
+    n_splits: int
+    seed: int
+    features: list[str]
+    max_eval_rul: float
 
     def summary(self) -> pd.DataFrame:
         """Mean and (sample) standard deviation of RMSE and MAE across folds."""
@@ -91,4 +101,12 @@ def cross_validate(
         )
         models.append(model)
 
-    return CVResult(folds=pd.DataFrame(rows), models=models)
+    return CVResult(
+        folds=pd.DataFrame(rows),
+        models=models,
+        cap=cap,
+        n_splits=n_splits,
+        seed=seed,
+        features=list(features),
+        max_eval_rul=max_eval_rul,
+    )

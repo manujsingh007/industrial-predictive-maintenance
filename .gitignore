@@ -12,6 +12,7 @@ build/
 /data/
 /mlruns/
 /mlartifacts/
+/mlflow.db
 /models/
 
 # Secrets and local config
