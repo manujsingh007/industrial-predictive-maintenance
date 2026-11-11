@@ -14,12 +14,24 @@ from predmaint.data.load import add_rul, load_train
 from predmaint.features.selection import DEFAULT_RUL_CAP, KEPT_SENSORS, SUBSETS_WITH_ADR
 from predmaint.features.windows import add_window_features, window_feature_names
 from predmaint.models.baselines import make_linear_baseline, make_mean_baseline
-from predmaint.training.cv import MAX_EVAL_RUL, cross_validate
+from predmaint.models.gbdt import LGBM_DEFAULTS, make_lgbm
+from predmaint.training.cv import MAX_EVAL_RUL, CVResult, cross_validate
 
 MODELS: dict[str, tuple[str, Callable[[], RegressorMixin]]] = {
     "mean": ("mean RUL", make_mean_baseline),
     "linear": ("linear regression", make_linear_baseline),
+    "lgbm": ("LightGBM", make_lgbm),
 }
+
+
+def model_hyperparams(model_key: str, result: CVResult) -> dict[str, object]:
+    """Hyperparameters to log, read from the fitted model (empty for the baselines)."""
+    if model_key != "lgbm":
+        return {}
+    params = result.models[0].get_params()
+    return {f"lgbm_{k}": params[k] for k in LGBM_DEFAULTS}
+
+
 FEATURE_SETS = ("current", "window")
 DEFAULT_WINDOWS = (10, 30)
 N_SPLITS = 5
@@ -94,6 +106,7 @@ def main() -> None:
                 "windows": ",".join(map(str, args.windows))
                 if args.features == "window"
                 else "none",
+                **model_hyperparams(args.model, result),
             },
         )
         print(f"MLflow run id: {run_id}")
