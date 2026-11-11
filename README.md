@@ -22,12 +22,45 @@ simulated C-MAPSS dataset ([dataset documentation](docs/dataset.md)).
   - RUL cap and sensor selection
     ([ADR 0001](docs/adr/0001-rul-cap-and-sensor-selection.md))
   - Frozen evaluation protocol ([docs/evaluation.md](docs/evaluation.md))
+- [x] **Milestone 2: evaluation framework and baselines (FD001)**
+  - Cross-validation split by engine (`predmaint.evaluation.splits`)
+  - Metrics: RMSE, MAE, PHM08 score, bootstrap confidence intervals
+    (`predmaint.evaluation.metrics`)
+  - Baselines: mean RUL and linear regression (`predmaint.models.baselines`)
+  - Experiment tracking with MLflow (`predmaint.tracking`)
 
-**Next**
+**Next: Milestone 3**
 
-- [ ] RUL estimation: baselines (mean RUL, linear regression), then stronger models
-- [ ] Failure prediction
-- [ ] Anomaly detection
+- [ ] Window features over each engine's recent cycles
+- [ ] LightGBM model
+- [ ] A deep sequence model
+- [ ] RUL-cap tuning (110–150, per [ADR 0001](docs/adr/0001-rul-cap-and-sensor-selection.md))
+- [ ] Prediction intervals
+
+Later: failure prediction and anomaly detection.
+
+## Results so far
+
+5-fold engine cross-validation on **FD001 training data**. These are **not** official test-set
+results; the test set is used once, at the end ([evaluation protocol](docs/evaluation.md)).
+
+| Model | CV RMSE | CV MAE |
+|---|---|---|
+| Mean RUL baseline | 45.11 ± 0.09 | 38.59 ± 0.04 |
+| Linear regression | 24.34 ± 0.82 | 19.89 ± 0.74 |
+
+Notes:
+
+- Values are in cycles, as mean ± standard deviation across the 5 folds.
+- The training target is capped at RUL 125, but scores are against the uncapped true RUL, on
+  validation rows with true RUL ≤ 150.
+
+To reproduce the table and browse the logged runs (after the Quickstart below):
+
+```bash
+uv run python -m predmaint.training.run_baselines --subset FD001   # prints the table, logs to MLflow
+uv run mlflow ui --backend-store-uri sqlite:///mlflow.db           # then open http://127.0.0.1:5000
+```
 
 ## Quickstart
 
