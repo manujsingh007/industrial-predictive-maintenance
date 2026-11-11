@@ -115,3 +115,29 @@ def test_second_run_reuses_experiment(cv_result: CVResult, tmp_tracking: dict[st
 
 def test_git_tags_outside_a_repo_are_unknown(tmp_path: Path) -> None:
     assert git_tags(tmp_path) == {"git_commit": "unknown", "git_dirty": "unknown"}
+
+
+def test_extra_params_and_run_name_are_logged(
+    cv_result: CVResult, tmp_tracking: dict[str, str]
+) -> None:
+    run_id = log_cv_result(
+        cv_result,
+        model_name="linear regression",
+        subset="FD001",
+        run_name="linear regression | window",
+        extra_params={"feature_set": "window", "windows": "10,30"},
+        **tmp_tracking,
+    )
+    run = MlflowClient(tracking_uri=tmp_tracking["tracking_uri"]).get_run(run_id)
+    assert run.info.run_name == "linear regression | window"
+    assert run.data.params["feature_set"] == "window"
+    assert run.data.params["windows"] == "10,30"
+
+
+def test_extra_params_cannot_override_standard_params(
+    cv_result: CVResult, tmp_tracking: dict[str, str]
+) -> None:
+    with pytest.raises(ValueError, match="cap"):
+        log_cv_result(
+            cv_result, model_name="m", subset="FD001", extra_params={"cap": 999}, **tmp_tracking
+        )

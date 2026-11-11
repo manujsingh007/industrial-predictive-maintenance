@@ -7,6 +7,7 @@ Open the UI with: ``uv run mlflow ui --backend-store-uri sqlite:///mlflow.db``
 
 import subprocess
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from mlflow.entities import Metric, Param, RunTag
@@ -54,6 +55,8 @@ def log_cv_result(
     *,
     model_name: str,
     subset: str,
+    extra_params: Mapping[str, object] | None = None,
+    run_name: str | None = None,
     experiment_name: str | None = None,
     tracking_uri: str = TRACKING_URI,
     artifact_location: str = ARTIFACT_ROOT,
@@ -66,8 +69,10 @@ def log_cv_result(
 
     Args:
         result: Output of :func:`predmaint.training.cv.cross_validate`.
-        model_name: Human-readable model name; also used as the run name.
+        model_name: Human-readable model name.
         subset: Data subset, e.g. "FD001".
+        extra_params: Additional params, e.g. the feature set; must not reuse a standard key.
+        run_name: Run name shown in the UI; defaults to ``model_name``.
         experiment_name: Defaults to ``rul-<subset>`` in lower case, e.g. "rul-fd001".
         tracking_uri: MLflow backend; tests pass a temporary database here.
         artifact_location: Artifact root used if the experiment has to be created.
@@ -75,13 +80,6 @@ def log_cv_result(
     Returns:
         The MLflow run id.
     """
-    client = MlflowClient(tracking_uri=tracking_uri)
-    experiment_id = _get_or_create_experiment(
-        client, experiment_name or f"rul-{subset.lower()}", artifact_location
-    )
-    run = client.create_run(experiment_id, run_name=model_name)
-    run_id = run.info.run_id
-
     params = {
         "model": model_name,
         "subset": subset,
@@ -91,6 +89,17 @@ def log_cv_result(
         "n_features": len(result.features),
         "max_eval_rul": result.max_eval_rul,
     }
+    clash = set(params) & set(extra_params or {})
+    if clash:
+        raise ValueError(f"extra_params may not override standard params: {sorted(clash)}")
+    params.update(extra_params or {})
+
+    client = MlflowClient(tracking_uri=tracking_uri)
+    experiment_id = _get_or_create_experiment(
+        client, experiment_name or f"rul-{subset.lower()}", artifact_location
+    )
+    run = client.create_run(experiment_id, run_name=run_name or model_name)
+    run_id = run.info.run_id
     now = int(time.time() * 1000)
     metrics = [
         Metric(key, float(row[key]), now, int(row["fold"]))

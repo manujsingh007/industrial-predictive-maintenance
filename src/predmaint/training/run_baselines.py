@@ -59,7 +59,12 @@ def main() -> None:
         mae_text = f"{s.loc['mean', 'mae']:.2f} ± {s.loc['std', 'mae']:.2f}"
         line = f"{name:<20} {rmse_text:>18} {mae_text:>18}"
         if not args.no_mlflow:
-            line += "  " + log_cv_result(result, model_name=name, subset=args.subset)
+            line += "  " + log_cv_result(
+                result,
+                model_name=name,
+                subset=args.subset,
+                extra_params={"feature_set": "current", "windows": "none"},
+            )
         print(line)
     print("\nstd = sample standard deviation across folds; units are cycles.")
     if not args.no_mlflow:
