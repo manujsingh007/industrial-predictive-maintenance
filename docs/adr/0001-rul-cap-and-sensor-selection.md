@@ -69,3 +69,46 @@ The three operating settings show one operating condition and correlate with RUL
   the final test result is unaffected.
 - **Changing these decisions needs a new ADR.** That applies to moving the cap outside 110–150 or
   changing the drop list.
+
+## Tuning result (2026-11-11)
+
+**Setup:**
+
+- LightGBM with window features (windows 10 and 30, 98 features);
+- 5-fold engine CV, seed 42, the same folds for every cap;
+- scored against the uncapped true RUL on validation rows with RUL ≤ 150;
+- logged in MLflow experiment `rul-fd001`, from commit `374898e` with no uncommitted changes.
+
+Reproduce with:
+
+```bash
+uv run python -m predmaint.training.run_cv --model lgbm --features window --subset FD001 --caps 110 120 125 130 140 150
+```
+
+| Cap | CV RMSE (mean ± std) | CV MAE (mean ± std) |
+|---|---|---|
+| 110 | 18.12 ± 0.81 | 13.34 ± 0.76 |
+| 120 | 16.74 ± 1.00 | 12.55 ± 0.84 |
+| **125** | **16.51 ± 1.06** | **12.36 ± 0.90** |
+| 130 | 16.57 ± 1.05 | 12.39 ± 0.91 |
+| 140 | 16.97 ± 1.43 | 12.56 ± 1.19 |
+| 150 | 17.83 ± 1.76 | 13.06 ± 1.43 |
+
+**Conclusion: cap 125 is confirmed.** This is consistent with the EDA, which put about 10% of the
+total sensor change at RUL 125–130.
+
+- **The error is U-shaped.**
+  - Too low a cap (110) stops the target too early, so predictions for engines further from
+    failure are too low.
+  - Too high a cap (150) asks the model to predict distances to failure that the sensors barely
+    show yet (EDA section 5).
+- **120–130 is flat.** The differences between these caps are far below the fold std.
+  - Comparing fold by fold, which is valid because every cap used the same folds: 125 and 130
+    are indistinguishable (mean difference +0.07 RMSE; each wins in some folds).
+  - Cap 120 is slightly but consistently worse (+0.24 RMSE, worse in 4 of 5 folds). This does
+    not change the choice.
+- **The fold std grows with higher caps** (0.81 at 110, 1.76 at 150). The growth comes mainly
+  from one fold, whose RMSE rises from 17.09 at cap 125 to 20.33 at cap 150; the other folds move
+  much less. Higher caps make results more sensitive to which engines are validated.
+- **Caveat: the 16.51 is slightly optimistic.** The cap was selected on the same CV folds that
+  report its score. The official test set remains the unbiased check.

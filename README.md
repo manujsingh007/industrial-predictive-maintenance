@@ -48,6 +48,8 @@ results; the test set is used once, at the end ([evaluation protocol](docs/evalu
 |---|---|---|
 | Mean RUL baseline | 45.11 ± 0.09 | 38.59 ± 0.04 |
 | Linear regression | 24.34 ± 0.82 | 19.89 ± 0.74 |
+| Linear regression + window features | 20.20 ± 0.87 | 16.53 ± 0.70 |
+| LightGBM + window features | 16.51 ± 1.06 | 12.36 ± 0.90 |
 
 Notes:
 
