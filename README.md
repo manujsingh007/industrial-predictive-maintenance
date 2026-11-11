@@ -66,6 +66,8 @@ uv run mlflow ui --backend-store-uri sqlite:///mlflow.db           # then open h
 
 Requires [uv](https://docs.astral.sh/uv/). It installs Python 3.12 automatically.
 
+macOS: LightGBM needs OpenMP: `brew install libomp`
+
 ```bash
 git clone https://github.com/manujsingh007/industrial-predictive-maintenance.git
 cd industrial-predictive-maintenance
