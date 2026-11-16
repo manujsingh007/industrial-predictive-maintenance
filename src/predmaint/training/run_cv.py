@@ -17,22 +17,46 @@ from predmaint.models.baselines import make_linear_baseline, make_mean_baseline
 from predmaint.models.gbdt import LGBM_DEFAULTS, make_lgbm
 from predmaint.training.cv import MAX_EVAL_RUL, CVResult, cross_validate
 
+
+def make_cnn() -> RegressorMixin:
+    """1D-CNN with default settings. PyTorch is imported only here (``deep`` dependency group)."""
+    from predmaint.models.cnn import CNNRegressor
+
+    return CNNRegressor()
+
+
 MODELS: dict[str, tuple[str, Callable[[], RegressorMixin]]] = {
     "mean": ("mean RUL", make_mean_baseline),
     "linear": ("linear regression", make_linear_baseline),
     "lgbm": ("LightGBM", make_lgbm),
+    "cnn": ("1D-CNN", make_cnn),
 }
+SEQUENCE_MODELS = {"cnn"}  # need --features sequence; all other models need row features
 
 
 def model_hyperparams(model_key: str, result: CVResult) -> dict[str, object]:
     """Hyperparameters to log, read from the fitted model (empty for the baselines)."""
-    if model_key != "lgbm":
-        return {}
-    params = result.models[0].get_params()
-    return {f"lgbm_{k}": params[k] for k in LGBM_DEFAULTS}
+    model = result.models[0]
+    if model_key == "lgbm":
+        params = model.get_params()
+        return {f"lgbm_{k}": params[k] for k in LGBM_DEFAULTS}
+    if model_key == "cnn":
+        logged = {f"cnn_{k}": v for k, v in model.get_params().items() if k != "sensors"}
+        logged["cnn_device_used"] = str(model.device_)  # MPS runs are not bit-reproducible
+        return logged
+    return {}
 
 
-FEATURE_SETS = ("current", "window")
+def check_combination(model_key: str, feature_set: str) -> None:
+    """Sequence models need the ``sequence`` feature set, and only they can use it."""
+    if (model_key in SEQUENCE_MODELS) != (feature_set == "sequence"):
+        raise ValueError(
+            f"--model {model_key} cannot be used with --features {feature_set}: "
+            "use --model cnn with --features sequence"
+        )
+
+
+FEATURE_SETS = ("current", "window", "sequence")
 DEFAULT_WINDOWS = (10, 30)
 N_SPLITS = 5
 SEED = 42
@@ -47,11 +71,16 @@ def build_features(
     - ``window``: the 14 current values plus causal rolling mean, std and slope of each sensor
       over each window.
 
+    - ``sequence``: ``unit``, ``cycle`` and the 14 sensors, for sequence models. ``unit`` and
+      ``cycle`` only group and order each engine's history; they are not model inputs.
+
     Window features depend only on each engine's own past, so computing them before the
     CV split cannot leak information between folds.
     """
     if feature_set == "current":
         return train, list(KEPT_SENSORS)
+    if feature_set == "sequence":
+        return train, ["unit", "cycle", *KEPT_SENSORS]
     if feature_set == "window":
         data = add_window_features(train, KEPT_SENSORS, windows)
         return data, list(KEPT_SENSORS) + window_feature_names(KEPT_SENSORS, windows)
@@ -115,6 +144,7 @@ def run_caps(
     caps = sorted(set(caps))
     if not caps or min(caps) <= 0:
         raise ValueError(f"caps must be positive integers, got {caps}")
+    check_combination(model_key, feature_set)
     model_name, factory = MODELS[model_key]
     data, features = build_features(add_rul(load_train(subset)), feature_set, windows)
 

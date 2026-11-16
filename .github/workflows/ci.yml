@@ -19,8 +19,10 @@ jobs:
         with:
           enable-cache: true
 
+      # The "deep" group adds PyTorch so the CNN tests run. On Linux, uv.lock pins the CPU-only
+      # build (see [tool.uv.sources] in pyproject.toml), so no CUDA libraries are downloaded.
       - name: Install dependencies
-        run: uv sync --locked
+        run: uv sync --locked --group deep
 
       - name: Lint
         run: uv run ruff check .
@@ -30,3 +32,7 @@ jobs:
 
       - name: Run tests
         run: uv run pytest
+
+      # Separate process: PyTorch and LightGBM must not be loaded together (tests_deep/README.md).
+      - name: Run deep-learning tests
+        run: uv run --group deep pytest tests_deep

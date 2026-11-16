@@ -125,3 +125,24 @@ def test_format_table_sorted_and_marks_lowest_rmse() -> None:
     assert lines[3].endswith("*") and lines[3].startswith("  125")
     assert not lines[2].endswith("*") and not lines[4].endswith("*")
     assert "18.50 ± 1.00" in lines[3]
+
+
+# --- model / feature-set combinations -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("model", "features", "ok"),
+    [
+        ("cnn", "sequence", True),
+        ("lgbm", "window", True),
+        ("cnn", "window", False),
+        ("cnn", "current", False),
+        ("linear", "sequence", False),
+    ],
+)
+def test_check_combination(model: str, features: str, ok: bool) -> None:
+    if ok:
+        run_cv.check_combination(model, features)
+    else:
+        with pytest.raises(ValueError, match="sequence"):
+            run_cv.check_combination(model, features)

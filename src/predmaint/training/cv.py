@@ -3,6 +3,7 @@
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 from sklearn.base import RegressorMixin
 
@@ -88,7 +89,10 @@ def cross_validate(
 
         y_val = y_true.iloc[val_idx]
         scored = (y_val <= max_eval_rul).to_numpy()
-        y_pred = model.predict(X.iloc[val_idx][scored])
+        # Predict every validation row, then keep the scored ones. Sequence models build each
+        # row's input from earlier cycles of the same engine, including cycles with
+        # RUL > max_eval_rul; for row-wise models this gives identical scored predictions.
+        y_pred = np.asarray(model.predict(X.iloc[val_idx]))[scored]
 
         rows.append(
             {
