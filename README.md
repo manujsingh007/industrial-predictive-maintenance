@@ -48,10 +48,9 @@ simulated C-MAPSS dataset ([dataset documentation](docs/dataset.md)).
 
 **Next: Milestone 4**
 
-- [ ] Error analysis:
-  - the worst engines;
-  - late vs early errors;
-  - error vs length of observed history.
+- [x] Error analysis: late vs early errors, error vs history length, worst engines and the
+  effect of the RUL cap ([summary](docs/error_analysis.md),
+  [notebook](notebooks/02_error_analysis_fd001.ipynb)).
 - [ ] Serving: FastAPI service with PostgreSQL storage.
 - [ ] Dashboard.
 - [ ] Docker packaging.
