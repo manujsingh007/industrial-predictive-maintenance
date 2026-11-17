@@ -28,6 +28,7 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -111,8 +112,29 @@ def _last_cycle_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[df.groupby("unit")["cycle"].idxmax()].sort_values("unit")
 
 
-def evaluate(subset: str, *, forced: bool = False) -> FinalResult:
-    """Run the frozen final evaluation (no guard, no files, no logging)."""
+@dataclass
+class FrozenModels:
+    """The frozen models trained on ALL training engines, plus the Mondrian calibration.
+
+    Shared by the final evaluation and by ``build_model`` (serving), so both use one code path.
+    """
+
+    model: Any  # LightGBM point model on window features
+    mean_model: Any  # mean-RUL baseline
+    linear_model: Any  # linear baseline on current sensors
+    features: list[str]  # LightGBM input columns, in training order
+    q_by_bin: pd.DataFrame  # bin, q, n_calibration, fallback
+
+    @property
+    def q_per_bin(self) -> np.ndarray:
+        return self.q_by_bin["q"].to_numpy(dtype=float)
+
+
+def train_frozen(subset: str) -> FrozenModels:
+    """Calibrate Mondrian q from out-of-fold residuals, then fit the models on all engines.
+
+    Exactly the frozen setup of ADRs 0001-0003. No test data is read.
+    """
     train = add_rul(load_train(subset))
     data, features = build_features(train, "window", DEFAULT_WINDOWS)
     y_capped = cap_rul(data["rul"], DEFAULT_RUL_CAP)
@@ -142,9 +164,21 @@ def evaluate(subset: str, *, forced: bool = False) -> FinalResult:
     )
 
     # 2. Final models on ALL training engines.
-    model = MODEL_FACTORY().fit(data[features], y_capped)
-    mean_model = make_mean_baseline().fit(train[KEPT_SENSORS], y_capped)
-    linear_model = make_linear_baseline().fit(train[KEPT_SENSORS], y_capped)
+    return FrozenModels(
+        model=MODEL_FACTORY().fit(data[features], y_capped),
+        mean_model=make_mean_baseline().fit(train[KEPT_SENSORS], y_capped),
+        linear_model=make_linear_baseline().fit(train[KEPT_SENSORS], y_capped),
+        features=features,
+        q_by_bin=q_by_bin,
+    )
+
+
+def evaluate(subset: str, *, forced: bool = False) -> FinalResult:
+    """Run the frozen final evaluation (no guard, no files, no logging)."""
+    frozen = train_frozen(subset)
+    model, mean_model, linear_model = frozen.model, frozen.mean_model, frozen.linear_model
+    features, q_by_bin, q_bins = frozen.features, frozen.q_by_bin, frozen.q_per_bin
+    labels = mondrian_bin_labels(MONDRIAN_EDGES)
 
     # 3. Test: causal window features on each engine's full history; predict at its last cycle.
     test = load_test(subset)
@@ -361,6 +395,7 @@ def run_final_eval(
     force: bool = False,
     report_dir: Path = REPORTS_DIR,
     tracking_uri: str | None = None,
+    artifact_location: str | None = None,
 ) -> tuple[FinalResult, Path, Path, str]:
     """Guard, evaluate, write the report and predictions, then log to MLflow.
 
@@ -404,6 +439,7 @@ def run_final_eval(
         tags={"stage": "final_test", "forced_rerun": str(forced).lower()},
         artifacts=[report, predictions_csv],
         **({"tracking_uri": tracking_uri} if tracking_uri else {}),
+        **({"artifact_location": artifact_location} if artifact_location else {}),
     )
     return result, report, predictions_csv, run_id
 

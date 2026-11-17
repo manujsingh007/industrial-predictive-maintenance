@@ -24,10 +24,12 @@ from predmaint.training.final_eval import (
     wilson_interval,
 )
 
+MLRUNS = TRACKING_DB.parent / "mlruns"
+
 
 @pytest.fixture(autouse=True)
 def real_outputs_untouched() -> Iterator[None]:
-    """Fail any test that touches the real mlflow.db or the real reports/ folder."""
+    """Fail any test that touches the real mlflow.db, reports/ or mlruns/ (artifacts)."""
 
     def snapshot() -> tuple:
         db = (
@@ -40,7 +42,8 @@ def real_outputs_untouched() -> Iterator[None]:
             if final_eval.REPORTS_DIR.exists()
             else None
         )
-        return db, reports
+        mlruns = sorted(p.name for p in MLRUNS.glob("*")) if MLRUNS.exists() else None
+        return db, reports, mlruns
 
     before = snapshot()
     yield
@@ -134,7 +137,10 @@ def test_full_run_writes_outputs_logs_and_then_refuses(
 ) -> None:
     uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
     result, report, predictions_csv, run_id = run_final_eval(
-        "FD001", report_dir=tmp_path / "reports", tracking_uri=uri
+        "FD001",
+        report_dir=tmp_path / "reports",
+        tracking_uri=uri,
+        artifact_location=(tmp_path / "artifacts").as_uri(),
     )
 
     csv = pd.read_csv(predictions_csv)
@@ -165,14 +171,30 @@ def test_full_run_writes_outputs_logs_and_then_refuses(
     assert artifacts == {report.name, predictions_csv.name}
 
     with pytest.raises(FinalEvalAlreadyDone):  # second run refused
-        run_final_eval("FD001", report_dir=tmp_path / "reports", tracking_uri=uri)
+        run_final_eval(
+            "FD001",
+            report_dir=tmp_path / "reports",
+            tracking_uri=uri,
+            artifact_location=(tmp_path / "artifacts").as_uri(),
+        )
 
 
 def test_forced_rerun_is_labelled(synthetic: pd.DataFrame, tmp_path: Path) -> None:
     uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
     reports = tmp_path / "reports"
-    run_final_eval("FD001", report_dir=reports, tracking_uri=uri)
-    _, report, _, run_id = run_final_eval("FD001", force=True, report_dir=reports, tracking_uri=uri)
+    run_final_eval(
+        "FD001",
+        report_dir=reports,
+        tracking_uri=uri,
+        artifact_location=(tmp_path / "artifacts").as_uri(),
+    )
+    _, report, _, run_id = run_final_eval(
+        "FD001",
+        force=True,
+        report_dir=reports,
+        tracking_uri=uri,
+        artifact_location=(tmp_path / "artifacts").as_uri(),
+    )
     assert "Forced re-run" in report.read_text()
     assert MlflowClient(tracking_uri=uri).get_run(run_id).data.tags["forced_rerun"] == "true"
 
