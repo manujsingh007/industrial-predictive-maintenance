@@ -14,6 +14,7 @@ importable wherever the model is loaded, e.g. inside the serving Docker image.
 
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from importlib.metadata import version
 from typing import Any
 
@@ -93,10 +94,32 @@ def register_champion(
     return model_version
 
 
+@dataclass(frozen=True)
+class LoadedModel:
+    """A loaded predictor plus which registered model version it is."""
+
+    predictor: RULPredictor
+    name: str
+    version: str
+
+
+def load_champion_info(
+    model_name: str = MODEL_NAME, *, alias: str = CHAMPION_ALIAS, tracking_uri: str = TRACKING_URI
+) -> LoadedModel:
+    """Resolve ``alias`` to a version number once, then load exactly that version.
+
+    Loading by number (not by alias) means the reported version is guaranteed to be the one
+    loaded, even if someone moves the alias at the same moment.
+    """
+    client = MlflowClient(tracking_uri=tracking_uri, registry_uri=tracking_uri)
+    model_version = str(client.get_model_version_by_alias(model_name, alias).version)
+    with _tracking_uri(tracking_uri):
+        pyfunc_model = mlflow.pyfunc.load_model(f"models:/{model_name}/{model_version}")
+    return LoadedModel(pyfunc_model.unwrap_python_model().predictor, model_name, model_version)
+
+
 def load_champion(
     model_name: str = MODEL_NAME, *, alias: str = CHAMPION_ALIAS, tracking_uri: str = TRACKING_URI
 ) -> RULPredictor:
     """Load the :class:`RULPredictor` that ``alias`` (default "champion") currently points to."""
-    with _tracking_uri(tracking_uri):
-        pyfunc_model = mlflow.pyfunc.load_model(f"models:/{model_name}@{alias}")
-    return pyfunc_model.unwrap_python_model().predictor
+    return load_champion_info(model_name, alias=alias, tracking_uri=tracking_uri).predictor
