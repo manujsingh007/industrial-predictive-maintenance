@@ -27,6 +27,10 @@ class CVResult:
         seed: Fold shuffling seed.
         features: Feature columns given to the model.
         max_eval_rul: Largest true RUL that was scored.
+        oof: Out-of-fold predictions, one row per validation row (every engine appears in
+            exactly one fold): ``fold``, ``unit``, ``cycle`` (if present in the data),
+            ``rul`` (uncapped true RUL), ``pred``, and ``scored`` (``rul <= max_eval_rul``).
+            The index is the row's index in ``train_df``.
     """
 
     folds: pd.DataFrame
@@ -36,6 +40,7 @@ class CVResult:
     seed: int
     features: list[str]
     max_eval_rul: float
+    oof: pd.DataFrame
 
     def summary(self) -> pd.DataFrame:
         """Mean and (sample) standard deviation of RMSE and MAE across folds."""
@@ -72,7 +77,7 @@ def cross_validate(
         max_eval_rul: Largest true RUL that is scored.
 
     Returns:
-        Per-fold scores and fitted models; see :class:`CVResult`.
+        Per-fold scores, fitted models and out-of-fold predictions; see :class:`CVResult`.
     """
     missing = {"unit", "rul", *features} - set(train_df.columns)
     if missing:
@@ -82,7 +87,8 @@ def cross_validate(
     y_true = train_df["rul"]
     y_train_target = cap_rul(y_true, cap)
 
-    rows, models = [], []
+    id_columns = ["unit", "cycle"] if "cycle" in train_df.columns else ["unit"]
+    rows, models, oof_parts = [], [], []
     for fold, (train_idx, val_idx) in enumerate(engine_folds(train_df, n_splits, seed)):
         model = model_factory()
         model.fit(X.iloc[train_idx], y_train_target.iloc[train_idx])
@@ -92,7 +98,15 @@ def cross_validate(
         # Predict every validation row, then keep the scored ones. Sequence models build each
         # row's input from earlier cycles of the same engine, including cycles with
         # RUL > max_eval_rul; for row-wise models this gives identical scored predictions.
-        y_pred = np.asarray(model.predict(X.iloc[val_idx]))[scored]
+        y_pred_all = np.asarray(model.predict(X.iloc[val_idx]), dtype=float)
+        y_pred = y_pred_all[scored]
+
+        oof_part = train_df[id_columns].iloc[val_idx].copy()
+        oof_part.insert(0, "fold", fold)
+        oof_part["rul"] = y_val.to_numpy()
+        oof_part["pred"] = y_pred_all
+        oof_part["scored"] = scored
+        oof_parts.append(oof_part)
 
         rows.append(
             {
@@ -113,4 +127,5 @@ def cross_validate(
         seed=seed,
         features=list(features),
         max_eval_rul=max_eval_rul,
+        oof=pd.concat(oof_parts),
     )

@@ -5,9 +5,10 @@ built from this file's location, so it is the same no matter which directory cod
 Open the UI with: ``uv run mlflow ui --backend-store-uri sqlite:///mlflow.db``
 """
 
+import numbers
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from mlflow.entities import Metric, Param, RunTag
@@ -56,6 +57,7 @@ def log_cv_result(
     model_name: str,
     subset: str,
     extra_params: Mapping[str, object] | None = None,
+    extra_metrics: Mapping[str, float | Sequence[float]] | None = None,
     run_name: str | None = None,
     experiment_name: str | None = None,
     tracking_uri: str = TRACKING_URI,
@@ -72,6 +74,8 @@ def log_cv_result(
         model_name: Human-readable model name.
         subset: Data subset, e.g. "FD001".
         extra_params: Additional params, e.g. the feature set; must not reuse a standard key.
+        extra_metrics: Additional metrics. A number is logged once (step 0); a sequence is
+            logged with step = position, e.g. one value per fold.
         run_name: Run name shown in the UI; defaults to ``model_name``.
         experiment_name: Defaults to ``rul-<subset>`` in lower case, e.g. "rul-fd001".
         tracking_uri: MLflow backend; tests pass a temporary database here.
@@ -112,6 +116,9 @@ def log_cv_result(
         for key in ("rmse", "mae")
         for stat in ("mean", "std")
     ]
+    for key, value in (extra_metrics or {}).items():
+        values = [value] if isinstance(value, numbers.Real) else list(value)
+        metrics += [Metric(key, float(v), now, step) for step, v in enumerate(values)]
 
     try:
         client.log_batch(

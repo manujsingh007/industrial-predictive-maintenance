@@ -123,3 +123,37 @@ def test_summary_has_mean_and_std(fleet: pd.DataFrame) -> None:
 def test_missing_columns_raise(fleet: pd.DataFrame) -> None:
     with pytest.raises(ValueError, match="rul"):
         cross_validate(make_mean_baseline, fleet.drop(columns="rul"))
+
+
+# --- out-of-fold predictions ----------------------------------------------------------
+
+
+def test_oof_has_every_row_exactly_once(fleet: pd.DataFrame) -> None:
+    oof = cross_validate(make_mean_baseline, fleet).oof
+    assert len(oof) == len(fleet)
+    assert sorted(oof.index) == sorted(fleet.index)
+    assert list(oof.columns) == ["fold", "unit", "cycle", "rul", "pred", "scored"]
+    pd.testing.assert_series_equal(oof["rul"], fleet.loc[oof.index, "rul"], check_names=False)
+
+
+def test_oof_folds_are_disjoint_engine_groups(fleet: pd.DataFrame) -> None:
+    oof = cross_validate(make_mean_baseline, fleet).oof
+    assert (oof.groupby("unit")["fold"].nunique() == 1).all()  # an engine sits in one fold
+
+
+def test_oof_predictions_come_from_that_folds_model(fleet: pd.DataFrame) -> None:
+    result = cross_validate(make_linear_baseline, fleet)
+    for fold, model in enumerate(result.models):
+        rows = result.oof[result.oof["fold"] == fold]
+        expected = model.predict(fleet.loc[rows.index, KEPT_SENSORS])
+        np.testing.assert_allclose(rows["pred"], expected)
+
+
+def test_oof_scored_flag_and_fold_metrics_agree(fleet: pd.DataFrame) -> None:
+    result = cross_validate(make_mean_baseline, fleet)
+    oof = result.oof
+    assert (oof["scored"] == (oof["rul"] <= 150)).all()
+    for fold, row in result.folds.set_index("fold").iterrows():
+        scored = oof[(oof["fold"] == fold) & oof["scored"]]
+        err = scored["pred"] - scored["rul"]
+        assert row["rmse"] == pytest.approx(float(np.sqrt(np.mean(err**2))))
