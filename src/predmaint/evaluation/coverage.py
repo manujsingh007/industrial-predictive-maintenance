@@ -1,8 +1,8 @@
 """Honest evaluation of conformal intervals with cross-fold calibration.
 
-For each fold k, the interval half-width q is computed from the out-of-fold residuals of the
-**other** folds only, then coverage and width are measured on fold k. Fold k's own residuals never
-set its own q, so the evaluation does not grade its own homework.
+For each fold k, the conformal correction q is computed from the out-of-fold conformity
+scores of the **other** folds only, then coverage and width are measured on fold k. Fold k's
+own scores never set its own q, so the evaluation does not grade its own homework.
 
 Only rows with true RUL <= ``max_eval_rul`` (150, docs/evaluation.md) are used, both for
 calibration and for evaluation, so the two describe the same population.
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from predmaint.models.conformal import conformal_quantile, interval
+from predmaint.models.conformal import conformal_score_quantile, cqr_interval, cqr_scores, interval
 
 RUL_BUCKET_EDGES = (0, 25, 50, 75, 100, 150)
 
@@ -25,41 +25,53 @@ class CoverageReport:
 
     Attributes:
         alpha: Miscoverage rate; target coverage is ``1 - alpha``.
+        method: ``"split"`` or ``"cqr"``.
         per_fold: One row per fold: ``fold``, ``q``, ``n``, ``coverage``, ``mean_width``.
         by_bucket: One row per true-RUL bucket: ``bucket``, ``n``, ``coverage``, ``mean_width``.
             Buckets are right-closed: [0, 25], (25, 50], (50, 75], (75, 100], (100, 150].
         overall: ``coverage`` and ``mean_width`` over all evaluated rows, plus ``n``.
-        rows: Every evaluated row with its fold, ``rul``, ``pred``, ``residual``, ``lower``,
+        rows: Every evaluated row with its fold, ``rul``, the method's inputs, ``score``, ``lower``,
             ``upper``, ``covered``, ``width`` and ``bucket``.
     """
 
     alpha: float
+    method: str
     per_fold: pd.DataFrame
     by_bucket: pd.DataFrame
     overall: dict[str, float]
     rows: pd.DataFrame
 
 
+METHODS = ("split", "cqr")
+_REQUIRED = {"split": {"fold", "rul", "pred"}, "cqr": {"fold", "rul", "lo", "hi"}}
+
+
 def cross_fold_coverage(
     oof: pd.DataFrame,
     alpha: float = 0.1,
     *,
+    method: str = "split",
     max_eval_rul: float = 150,
     bucket_edges: Sequence[float] = RUL_BUCKET_EDGES,
 ) -> CoverageReport:
-    """Coverage and width of split-conformal intervals, calibrating each fold on the others.
+    """Coverage and width of conformal intervals, calibrating each fold on the others.
 
     Args:
-        oof: Out-of-fold predictions with ``fold``, ``rul`` (uncapped true RUL) and ``pred``,
-            e.g. ``CVResult.oof``.
+        oof: Out-of-fold predictions with ``fold`` and ``rul`` (uncapped true RUL), plus
+            ``pred`` for ``method="split"`` or ``lo``/``hi`` (quantile predictions) for
+            ``method="cqr"``.
         alpha: Miscoverage rate; 0.1 targets 90% coverage.
+        method: ``"split"`` (|y - pred|, interval pred ± q) or ``"cqr"``
+            (max(lo - y, y - hi), interval [lo - q, hi + q]).
         max_eval_rul: Rows with larger true RUL are ignored for calibration and evaluation.
         bucket_edges: Edges of the true-RUL buckets for the conditional-coverage table.
 
     Raises:
-        ValueError: On missing columns or fewer than two folds.
+        ValueError: On an unknown method, missing columns or fewer than two folds.
     """
-    missing = {"fold", "rul", "pred"} - set(oof.columns)
+    if method not in METHODS:
+        raise ValueError(f"unknown method {method!r}; expected one of {METHODS}")
+    missing = _REQUIRED[method] - set(oof.columns)
     if missing:
         raise ValueError(f"oof is missing columns: {sorted(missing)}")
     data = oof[oof["rul"] <= max_eval_rul].copy()
@@ -67,12 +79,19 @@ def cross_fold_coverage(
     if len(folds) < 2:
         raise ValueError("need at least two folds to calibrate on the other folds")
 
-    data["residual"] = data["rul"] - data["pred"]
+    if method == "split":
+        data["score"] = np.abs(data["rul"] - data["pred"])
+    else:
+        data["score"] = cqr_scores(data["rul"], data["lo"], data["hi"])
+
     per_fold, evaluated = [], []
     for k in folds:
         test = data[data["fold"] == k].copy()
-        q = conformal_quantile(data.loc[data["fold"] != k, "residual"], alpha)
-        test["lower"], test["upper"] = interval(test["pred"], q)
+        q = conformal_score_quantile(data.loc[data["fold"] != k, "score"], alpha)
+        if method == "split":
+            test["lower"], test["upper"] = interval(test["pred"], q)
+        else:
+            test["lower"], test["upper"] = cqr_interval(test["lo"], test["hi"], q)
         test["covered"] = (test["lower"] <= test["rul"]) & (test["rul"] <= test["upper"])
         test["width"] = test["upper"] - test["lower"]
         per_fold.append(
@@ -104,6 +123,7 @@ def cross_fold_coverage(
     }
     return CoverageReport(
         alpha=alpha,
+        method=method,
         per_fold=pd.DataFrame(per_fold),
         by_bucket=by_bucket,
         overall=overall,

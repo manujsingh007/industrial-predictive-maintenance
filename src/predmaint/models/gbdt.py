@@ -42,3 +42,15 @@ def make_lgbm(**overrides: Any) -> "LGBMRegressor":
     from lightgbm import LGBMRegressor
 
     return LGBMRegressor(**{**LGBM_DEFAULTS, **overrides})
+
+
+def make_lgbm_quantile(quantile: float, **overrides: Any) -> "LGBMRegressor":
+    """LightGBM that predicts the ``quantile``-th conditional quantile (pinball loss).
+
+    Same defaults as :func:`make_lgbm`; only the objective changes to ``"quantile"`` with
+    LightGBM's ``alpha`` set to ``quantile`` (e.g. 0.05 for a lower bound).
+    """
+    if not 0 < quantile < 1:
+        raise ValueError(f"quantile must be in (0, 1), got {quantile}")
+    model = make_lgbm(**overrides)
+    return model.set_params(objective="quantile", alpha=quantile)

@@ -9,7 +9,7 @@ import pytest
 from mlflow.tracking import MlflowClient
 
 from predmaint.features.selection import KEPT_SENSORS
-from predmaint.models.gbdt import make_lgbm
+from predmaint.models.gbdt import make_lgbm, make_lgbm_quantile
 from predmaint.tracking import TRACKING_DB
 from predmaint.training import run_conformal
 
@@ -41,26 +41,59 @@ def synthetic(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = pd.concat(frames, ignore_index=True)
     monkeypatch.setattr(run_conformal, "load_train", lambda subset: fake.copy())
     monkeypatch.setattr(run_conformal, "MODEL_FACTORY", lambda: make_lgbm(n_estimators=20))
+    monkeypatch.setattr(
+        run_conformal, "QUANTILE_FACTORY", lambda q: make_lgbm_quantile(q, n_estimators=20)
+    )
 
 
-def test_run_without_logging(synthetic: None) -> None:
-    result, report, run_id = run_conformal.run("FD001", alpha=0.1, log=False)
-    assert run_id is None
+def test_split_only_without_logging(synthetic: None) -> None:
+    result = run_conformal.run("FD001", alpha=0.1, method="split", log=False)
+    assert result.run_ids == {}
+    assert set(result.reports) == {"split"}
+    assert "lo" not in result.point.oof.columns  # quantile models not trained for split only
+    report = result.reports["split"]
     assert len(report.per_fold) == 5
     assert 0 <= report.overall["coverage"] <= 1
-    assert (result.oof["scored"] == (result.oof["rul"] <= 150)).all()
-    text = run_conformal.format_report(report)
-    assert "Target coverage: 90%" in text and "Overall: coverage" in text
+    text = run_conformal.format_report(result)
+    assert "Target coverage: 90%" in text and "split conformal coverage" in text
 
 
-def test_run_logs_coverage_metrics(synthetic: None, tmp_path: Path) -> None:
+def test_both_methods_side_by_side(synthetic: None) -> None:
+    result = run_conformal.run("FD001", alpha=0.1, method="both", log=False)
+    assert set(result.reports) == {"split", "cqr"}
+    oof = result.point.oof
+    assert {"lo", "hi"} <= set(oof.columns) and oof[["lo", "hi"]].notna().all().all()
+    # both methods are evaluated on exactly the same rows
+    for m in ("split", "cqr"):
+        assert result.reports[m].overall["n"] == result.reports["split"].overall["n"]
+    text = run_conformal.format_by_bucket(result.reports)
+    for column in (
+        "split conformal coverage",
+        "split conformal width",
+        "CQR coverage",
+        "CQR width",
+    ):
+        assert column in text
+    assert "all" in text
+
+
+def test_each_method_logged_as_its_own_run(synthetic: None, tmp_path: Path) -> None:
     uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
-    _, report, run_id = run_conformal.run("FD001", alpha=0.2, tracking_uri=uri)
+    result = run_conformal.run("FD001", alpha=0.2, method="both", tracking_uri=uri)
     client = MlflowClient(tracking_uri=uri)
-    run = client.get_run(run_id)
-    assert run.data.params["conformal_alpha"] == "0.2"
-    assert run.data.params["feature_set"] == "window"
-    assert run.data.metrics["conformal_coverage"] == pytest.approx(report.overall["coverage"])
-    assert "conformal_coverage_rul_0_25" in run.data.metrics
-    history = client.get_metric_history(run_id, "conformal_coverage_fold")
-    assert sorted(m.step for m in history) == [0, 1, 2, 3, 4]
+    assert set(result.run_ids) == {"split", "cqr"}
+    for m, run_id in result.run_ids.items():
+        run = client.get_run(run_id)
+        assert run.data.params["conformal_method"] == m
+        assert run.data.params["conformal_alpha"] == "0.2"
+        expected = result.reports[m].overall["coverage"]
+        assert run.data.metrics["conformal_coverage"] == pytest.approx(expected)
+        steps = sorted(m_.step for m_ in client.get_metric_history(run_id, "conformal_q_fold"))
+        assert steps == [0, 1, 2, 3, 4]
+    cqr_params = client.get_run(result.run_ids["cqr"]).data.params
+    assert cqr_params["cqr_quantiles"] == "0.05,0.95"
+
+
+def test_unknown_method_raises(synthetic: None) -> None:
+    with pytest.raises(ValueError, match="method"):
+        run_conformal.run("FD001", method="bogus", log=False)
