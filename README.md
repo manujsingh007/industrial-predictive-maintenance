@@ -55,6 +55,27 @@ results; the test set is used once, at the end ([evaluation protocol](docs/evalu
 The primary model is LightGBM on window features; see
 [ADR 0002](docs/adr/0002-model-choice.md) for why.
 
+### Prediction intervals
+
+These are 90% intervals for LightGBM from the same cross-validation. Each fold's interval is
+calibrated only on the other four folds.
+
+| Method | Coverage | Mean width | Worst predicted-RUL bin | Width when predicted RUL < 30 |
+|---|---|---|---|---|
+| Split conformal | 90.0% | 53.8 | 82.5% (90+) | 42.9 |
+| CQR | 90.0% | 61.1 | 80.2% (90+) | 42.7 |
+| **Mondrian conformal** (chosen) | **89.9%** | **47.9** | **89.3% (60–90)** | **12.1** |
+
+Widths are in cycles. Mondrian uses a separate correction per predicted-RUL bin: it stays close
+to 90% in every bin and is about 3.5× narrower near failure. See
+[ADR 0003](docs/adr/0003-prediction-intervals.md) for the full tables and limitations.
+
+To reproduce:
+
+```bash
+uv run python -m predmaint.training.run_conformal --subset FD001 --method all
+```
+
 Notes:
 
 - Values are in cycles, as mean ± standard deviation across the 5 folds.
