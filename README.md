@@ -45,12 +45,12 @@ simulated C-MAPSS dataset ([dataset documentation](docs/dataset.md)).
   - Mondrian conformal prediction intervals
     ([ADR 0003](docs/adr/0003-prediction-intervals.md))
   - One-time final test evaluation ([report](reports/final_test_fd001.md))
+- [x] **Milestone 4: error analysis**
+  - Late vs early errors, error vs history length, worst engines and the effect of the RUL cap
+  - [Summary](docs/error_analysis.md) and [notebook](notebooks/02_error_analysis_fd001.ipynb)
 
-**Next: Milestone 4**
+**Next: Milestone 5**
 
-- [x] Error analysis: late vs early errors, error vs history length, worst engines and the
-  effect of the RUL cap ([summary](docs/error_analysis.md),
-  [notebook](notebooks/02_error_analysis_fd001.ipynb)).
 - [ ] Serving: FastAPI service with PostgreSQL storage.
 - [ ] Dashboard.
 - [ ] Docker packaging.
