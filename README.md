@@ -8,41 +8,60 @@ failure to estimate **remaining useful life (RUL)**, predict upcoming failures, 
 behaviour, so that maintenance can be planned before a failure occurs. It is built on NASA's
 simulated C-MAPSS dataset ([dataset documentation](docs/dataset.md)).
 
-## Status: work in progress
+> **Headline result: official FD001 test set, 100 engines, evaluated once**
+>
+> LightGBM on causal window features:
+>
+> - **RMSE 14.59** cycles (95% CI 12.46–16.63), **MAE 11.07**, PHM08 score 314.6.
+> - The linear baseline scores RMSE 21.90. LightGBM is better by **7.31 cycles RMSE** (paired
+>   bootstrap 95% CI −10.20 to −4.57).
+> - 90% Mondrian prediction intervals covered **93 of 100 engines**. Per predicted-RUL bin,
+>   coverage ranged from 83% to 100% (small bins; see the report).
+>
+> The test set was sealed until a single final run, after every modelling decision had been
+> frozen. Full results: [reports/final_test_fd001.md](reports/final_test_fd001.md).
+
+## Status
 
 **Done**
 
-- [x] Project setup: uv, ruff, pytest
-- [x] CI on GitHub Actions (lint, format check, tests)
-- [x] Reproducible data download with SHA-256 checksum verification
-- [x] Dataset documentation ([docs/dataset.md](docs/dataset.md))
+- [x] Project setup: uv, ruff, pytest, CI on GitHub Actions
+- [x] Reproducible data download with SHA-256 checksum verification;
+  [dataset documentation](docs/dataset.md)
 - [x] **Milestone 1: data understanding (FD001)**
-  - Data loader with RUL labels (`predmaint.data.load`)
-  - Exploratory analysis ([notebooks/01_eda_fd001.ipynb](notebooks/01_eda_fd001.ipynb))
-  - RUL cap and sensor selection
-    ([ADR 0001](docs/adr/0001-rul-cap-and-sensor-selection.md))
-  - Frozen evaluation protocol ([docs/evaluation.md](docs/evaluation.md))
-- [x] **Milestone 2: evaluation framework and baselines (FD001)**
-  - Cross-validation split by engine (`predmaint.evaluation.splits`)
-  - Metrics: RMSE, MAE, PHM08 score, bootstrap confidence intervals
-    (`predmaint.evaluation.metrics`)
-  - Baselines: mean RUL and linear regression (`predmaint.models.baselines`)
-  - Experiment tracking with MLflow (`predmaint.tracking`)
+  - Data loader, [exploratory analysis](notebooks/01_eda_fd001.ipynb)
+  - RUL cap and sensor selection ([ADR 0001](docs/adr/0001-rul-cap-and-sensor-selection.md))
+  - Frozen [evaluation protocol](docs/evaluation.md)
+- [x] **Milestone 2: evaluation framework and baselines**
+  - Engine-based cross-validation
+  - Metrics: RMSE, MAE, PHM08 score, bootstrap intervals
+  - Mean and linear baselines
+  - MLflow experiment tracking
+- [x] **Milestone 3: models, intervals and final test (FD001)**
+  - Causal window features
+  - LightGBM, chosen as the primary model ([ADR 0002](docs/adr/0002-model-choice.md))
+  - 1D-CNN (PyTorch) for comparison
+  - RUL-cap tuning: 125 confirmed (ADR 0001)
+  - Mondrian conformal prediction intervals
+    ([ADR 0003](docs/adr/0003-prediction-intervals.md))
+  - One-time final test evaluation ([report](reports/final_test_fd001.md))
 
-**Next: Milestone 3**
+**Next: Milestone 4**
 
-- [ ] Window features over each engine's recent cycles
-- [ ] LightGBM model
-- [ ] A deep sequence model
-- [ ] RUL-cap tuning (110–150, per [ADR 0001](docs/adr/0001-rul-cap-and-sensor-selection.md))
-- [ ] Prediction intervals
+- [ ] Error analysis:
+  - the worst engines;
+  - late vs early errors;
+  - error vs length of observed history.
+- [ ] Serving: FastAPI service with PostgreSQL storage.
+- [ ] Dashboard.
+- [ ] Docker packaging.
 
 Later: failure prediction and anomaly detection.
 
-## Results so far
+## Cross-validation results (development, FD001 training data)
 
-5-fold engine cross-validation on **FD001 training data**. These are **not** official test-set
-results; the test set is used once, at the end ([evaluation protocol](docs/evaluation.md)).
+These tables come from **5-fold engine cross-validation on the training data**, used to make
+every modelling decision. They are **not** test-set results; see the headline result above.
 
 | Model | CV RMSE | CV MAE |
 |---|---|---|
@@ -52,13 +71,14 @@ results; the test set is used once, at the end ([evaluation protocol](docs/evalu
 | 1D-CNN on 30-cycle sequences | 18.98 ± 1.04 | 14.49 ± 0.76 |
 | **LightGBM + window features** (primary model) | **16.51 ± 1.06** | **12.36 ± 0.90** |
 
-The primary model is LightGBM on window features; see
-[ADR 0002](docs/adr/0002-model-choice.md) for why.
+- Values are in cycles, as mean ± standard deviation across the 5 folds.
+- The training target is capped at RUL 125. Scores are against the uncapped true RUL, on
+  validation rows with true RUL ≤ 150.
+- See [ADR 0002](docs/adr/0002-model-choice.md) for why LightGBM is the primary model.
 
-### Prediction intervals
+### Cross-validated prediction intervals (90% target)
 
-These are 90% intervals for LightGBM from the same cross-validation. Each fold's interval is
-calibrated only on the other four folds.
+Each fold's intervals are calibrated only on the other four folds.
 
 | Method | Coverage | Mean width | Worst predicted-RUL bin | Width when predicted RUL < 30 |
 |---|---|---|---|---|
@@ -66,27 +86,18 @@ calibrated only on the other four folds.
 | CQR | 90.0% | 61.1 | 80.2% (90+) | 42.7 |
 | **Mondrian conformal** (chosen) | **89.9%** | **47.9** | **89.3% (60–90)** | **12.1** |
 
-Widths are in cycles. Mondrian uses a separate correction per predicted-RUL bin: it stays close
-to 90% in every bin and is about 3.5× narrower near failure. See
-[ADR 0003](docs/adr/0003-prediction-intervals.md) for the full tables and limitations.
+Widths are in cycles. See [ADR 0003](docs/adr/0003-prediction-intervals.md) for the full tables
+and limitations.
 
-To reproduce:
+### Reproduce
 
-```bash
-uv run python -m predmaint.training.run_conformal --subset FD001 --method all
-```
-
-Notes:
-
-- Values are in cycles, as mean ± standard deviation across the 5 folds.
-- The training target is capped at RUL 125, but scores are against the uncapped true RUL, on
-  validation rows with true RUL ≤ 150.
-
-To reproduce the table and browse the logged runs (after the Quickstart below):
+After the Quickstart below:
 
 ```bash
-uv run python -m predmaint.training.run_baselines --subset FD001   # prints the table, logs to MLflow
-uv run mlflow ui --backend-store-uri sqlite:///mlflow.db           # then open http://127.0.0.1:5000
+uv run python -m predmaint.training.run_baselines --subset FD001                        # baselines
+uv run python -m predmaint.training.run_cv --model lgbm --features window --subset FD001  # LightGBM
+uv run python -m predmaint.training.run_conformal --subset FD001 --method all             # intervals
+uv run mlflow ui --backend-store-uri sqlite:///mlflow.db    # browse runs at http://127.0.0.1:5000
 ```
 
 ## Quickstart
