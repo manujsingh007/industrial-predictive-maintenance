@@ -132,3 +132,15 @@ class UnitPrediction(StoredPrediction):
     """A new prediction from a unit's stored history."""
 
     n_cycles_seen: int = Field(description="Stored readings the prediction is based on")
+
+
+class UnitSummary(BaseModel):
+    """What is stored for a unit; lets clients resume where they stopped."""
+
+    unit_id: int
+    n_readings: int
+    last_cycle: int | None
+    n_predictions: int
+    last_prediction_cycle: int | None = Field(
+        description="Cycle of the most recent prediction's input; null if none"
+    )

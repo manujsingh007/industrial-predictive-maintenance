@@ -112,3 +112,37 @@ uv sync                                     # create the environment from uv.loc
 uv run python -m predmaint.data.download    # download and verify the dataset into data/raw/cmapss/
 uv run pytest                               # run the tests
 ```
+
+## Run the full service locally
+
+Needs Docker (Docker Desktop on macOS) and the Quickstart above. Run each step in its own
+terminal where noted.
+
+```bash
+# 1. Database: copy the example settings, set a password, then start PostgreSQL
+cp .env.example .env                  # edit POSTGRES_PASSWORD and DATABASE_URL to match
+docker compose up -d                  # wait for "healthy": docker compose ps
+
+# 2. Schema: create or upgrade the tables
+uv run alembic upgrade head
+
+# 3. Model: train on all training engines and register it as the "champion" (once)
+uv run python -m predmaint.training.build_model --subset FD001
+
+# 4. API (keep this terminal open); interactive docs at http://127.0.0.1:8000/docs
+uv run uvicorn predmaint.serving.api:app
+
+# 5. In a second terminal: replay test engines as if they were live
+uv run python -m predmaint.simulation.replay --subset FD001 --units 1-10 --predict-every 10
+```
+
+- **The replay** sends each engine's readings in cycle order and asks for a prediction every 10
+  cycles and at the last one. Add `--delay 0.2` to watch it at a "live" pace.
+- **Resuming:** if the replay is interrupted, run the same command again. Already-stored cycles
+  are skipped.
+- **No label leakage:** the replay never reads the true-RUL file, so no labels reach the service.
+- **Results:** `GET /units/{id}/predictions` returns a unit's prediction history.
+- **Stopping:** `docker compose down` stops PostgreSQL; the data stays in a Docker volume.
+
+On macOS, if `docker` is not found although Docker Desktop is running, add its tools to your
+PATH: `export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"`.

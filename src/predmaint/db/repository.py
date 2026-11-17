@@ -94,3 +94,18 @@ def unit_known(session: Session, unit_id: int) -> bool:
         if session.scalar(select(model.id).where(model.unit_id == unit_id).limit(1)) is not None:
             return True
     return False
+
+
+def unit_summary(session: Session, unit_id: int) -> dict[str, int | None]:
+    """Stored readings and predictions of a unit, for clients that resume (e.g. the replay)."""
+    n_readings, last_cycle = count_readings(session, unit_id)
+    n_predictions, last_prediction_cycle = session.execute(
+        select(func.count(), func.max(PredictionRow.cycle)).where(PredictionRow.unit_id == unit_id)
+    ).one()
+    return {
+        "unit_id": unit_id,
+        "n_readings": n_readings,
+        "last_cycle": last_cycle,
+        "n_predictions": int(n_predictions),
+        "last_prediction_cycle": last_prediction_cycle,
+    }

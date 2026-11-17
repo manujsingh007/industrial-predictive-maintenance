@@ -190,3 +190,18 @@ def test_unit_with_readings_but_no_predictions_has_empty_history(client: TestCli
 
 def test_health_reports_database_ok(client: TestClient) -> None:
     assert client.get("/health").json()["database"] == "ok"
+
+
+def test_unit_summary_for_resuming(client: TestClient) -> None:
+    assert client.get("/units/11").status_code == 404
+    client.post("/units/11/readings", json=readings(range(1, 26)))
+    assert client.get("/units/11").json() == {
+        "unit_id": 11,
+        "n_readings": 25,
+        "last_cycle": 25,
+        "n_predictions": 0,
+        "last_prediction_cycle": None,
+    }
+    client.get("/units/11/prediction")
+    summary = client.get("/units/11").json()
+    assert summary["n_predictions"] == 1 and summary["last_prediction_cycle"] == 25

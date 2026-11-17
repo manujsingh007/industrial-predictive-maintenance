@@ -37,6 +37,7 @@ from predmaint.serving.schemas import (
     ReadingsStored,
     StoredPrediction,
     UnitPrediction,
+    UnitSummary,
 )
 
 logger = logging.getLogger(__name__)
@@ -196,6 +197,18 @@ def create_app(
             raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         total, last_cycle = repository.count_readings(session, unit_id)
         return ReadingsStored(unit_id=unit_id, n_stored=n, n_total=total, last_cycle=last_cycle)
+
+    @app.get(
+        "/units/{unit_id}",
+        response_model=UnitSummary,
+        responses={404: {"description": "Unknown unit"}, 503: {"description": "No DB"}},
+        tags=["units"],
+    )
+    def unit_status(unit_id: UnitId, session: SessionDep) -> UnitSummary:
+        """How many readings and predictions are stored for the unit (used to resume)."""
+        if not repository.unit_known(session, unit_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"unit {unit_id} is unknown")
+        return UnitSummary(**repository.unit_summary(session, unit_id))
 
     @app.get(
         "/units/{unit_id}/prediction",

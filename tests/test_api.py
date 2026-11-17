@@ -245,6 +245,7 @@ def test_unit_endpoints_are_503_without_database(client: TestClient) -> None:
         ("post", "/units/5/readings", {"json": body}),
         ("get", "/units/5/prediction", {}),
         ("get", "/units/5/predictions", {}),
+        ("get", "/units/5", {}),
     ):
         r = getattr(client, method)(url, **kwargs)
         assert r.status_code == 503, url
