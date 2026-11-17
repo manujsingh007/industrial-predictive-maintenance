@@ -11,6 +11,27 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    # Throwaway PostgreSQL for the integration tests. These credentials exist only inside
+    # this CI job, so they are not secrets.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: predmaint
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: predmaint
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U predmaint -d predmaint"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+psycopg://predmaint:ci-only-password@localhost:5432/predmaint
+
     steps:
       - uses: actions/checkout@v4
 
@@ -32,6 +53,13 @@ jobs:
 
       - name: Run tests
         run: uv run pytest
+
+      # Applies the real migrations with the same command used locally.
+      - name: Run database migrations
+        run: uv run alembic upgrade head
+
+      - name: Run integration tests (PostgreSQL)
+        run: uv run pytest -m integration
 
       # Separate process: PyTorch and LightGBM must not be loaded together (tests_deep/README.md).
       - name: Run deep-learning tests

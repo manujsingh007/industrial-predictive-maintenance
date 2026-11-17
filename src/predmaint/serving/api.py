@@ -1,32 +1,48 @@
-"""Stateless FastAPI service: one engine's readings in, RUL with a 90% interval out.
+"""FastAPI RUL service: a stateless ``/predict`` plus PostgreSQL-backed unit endpoints.
 
 Run locally: ``uv run uvicorn predmaint.serving.api:app --reload``. The interactive docs are at
 http://127.0.0.1:8000/docs.
 
 - The champion model is loaded **once at startup** (FastAPI lifespan), from the MLflow
   registry at ``MLFLOW_TRACKING_URI`` (default: the project's ``mlflow.db``).
-- If loading fails, the service still starts. ``/health`` and ``/predict`` then answer 503
-  with a clear message, instead of the process crashing.
-- The service is stateless: nothing is stored between requests.
+- ``POST /predict`` is stateless: readings in, prediction out, nothing stored.
+- ``/units/...`` endpoints store readings and predictions in PostgreSQL (``DATABASE_URL`` from
+  the environment or ``.env``; schema created by ``alembic upgrade head``).
+- If the model or the database is unavailable, the service still starts. The endpoints that
+  need the missing part answer 503 with a clear message, instead of the process crashing.
 """
 
 import logging
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from typing import Annotated
 
 import pandas as pd
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, status
 from fastapi.responses import JSONResponse
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session, sessionmaker
 
+from predmaint.db import repository
+from predmaint.db.settings import get_database_url
 from predmaint.serving.predictor import InvalidHistoryError
 from predmaint.serving.registry import LoadedModel
-from predmaint.serving.schemas import HealthResponse, PredictRequest, PredictResponse
+from predmaint.serving.schemas import (
+    HealthResponse,
+    PredictRequest,
+    PredictResponse,
+    ReadingsBatch,
+    ReadingsStored,
+    StoredPrediction,
+    UnitPrediction,
+)
 
 logger = logging.getLogger(__name__)
 
 ModelLoader = Callable[[], LoadedModel]
+UnitId = Annotated[int, Path(ge=1, description="Engine identifier")]
 
 
 def load_from_registry() -> LoadedModel:
@@ -48,55 +64,113 @@ def get_model(request: Request) -> LoadedModel:
     return model
 
 
+def get_session(request: Request) -> Iterator[Session]:
+    """FastAPI dependency: a database session per request, or 503 if no database is set up."""
+    factory: sessionmaker | None = request.app.state.session_factory
+    if factory is None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not configured: set DATABASE_URL (see .env.example)",
+        )
+    session = factory()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
 ModelDep = Annotated[LoadedModel, Depends(get_model)]
+SessionDep = Annotated[Session, Depends(get_session)]
 
 
-def create_app(load_model: ModelLoader = load_from_registry) -> FastAPI:
-    """Build the app; ``load_model`` runs once at startup (tests pass a fake loader)."""
+def create_app(
+    load_model: ModelLoader = load_from_registry, database_url: str | None = None
+) -> FastAPI:
+    """Build the app.
+
+    Args:
+        load_model: Runs once at startup; tests pass a fake loader.
+        database_url: SQLAlchemy URL for PostgreSQL. None disables the ``/units`` endpoints
+            (503); the stateless ``/predict`` still works.
+    """
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.model, app.state.load_error = None, None
+        app.state.engine, app.state.session_factory = None, None
         try:
             app.state.model = load_model()
             logger.info("Loaded %s version %s", app.state.model.name, app.state.model.version)
-        except Exception as exc:  # keep serving /health; /predict answers 503
+        except Exception as exc:  # keep serving; endpoints that need the model answer 503
             app.state.load_error = f"{type(exc).__name__}: {exc}"
             logger.error("Could not load model: %s", app.state.load_error)
+        if database_url:
+            # pool_pre_ping replaces connections the database has closed in the meantime.
+            app.state.engine = create_engine(
+                database_url, pool_pre_ping=True, connect_args={"connect_timeout": 5}
+            )
+            app.state.session_factory = sessionmaker(app.state.engine, expire_on_commit=False)
         yield
+        if app.state.engine is not None:
+            app.state.engine.dispose()
 
     app = FastAPI(
         title="Predictive maintenance: RUL service",
         description="Remaining useful life of a turbofan engine (C-MAPSS FD001) with a 90% "
-        "prediction interval. Send one engine's readings, oldest first.",
-        version="1.0.0",
+        "prediction interval. Either send readings to the stateless /predict, or store them "
+        "per unit and ask for a prediction from the stored history.",
+        version="1.1.0",
         lifespan=lifespan,
     )
 
-    @app.get("/health", response_model=HealthResponse)
+    @app.exception_handler(OperationalError)
+    def database_unavailable(request: Request, exc: OperationalError) -> JSONResponse:
+        """A configured but unreachable database is a 503, not an opaque 500."""
+        logger.error("Database error: %s", exc)
+        return JSONResponse(
+            {"detail": "Database unavailable; check that PostgreSQL is running"},
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    def database_status(request: Request) -> str:
+        if request.app.state.engine is None:
+            return "not configured"
+        try:
+            with request.app.state.engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+        except Exception:
+            return "unavailable"
+        return "ok"
+
+    @app.get("/health", response_model=HealthResponse, tags=["service"])
     def health(request: Request) -> JSONResponse:
-        """``ok`` (200) when a model is loaded, otherwise ``unavailable`` (503)."""
+        """``ok`` (200) when a model is loaded, otherwise ``unavailable`` (503).
+
+        The database status is reported too, but does not change the status code: the
+        stateless ``/predict`` works without it.
+        """
         model: LoadedModel | None = request.app.state.model
-        if model is None:
-            body = HealthResponse(status="unavailable")
-            return JSONResponse(body.model_dump(), status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
-        body = HealthResponse(status="ok", model_name=model.name, model_version=model.version)
-        return JSONResponse(body.model_dump())
+        body = HealthResponse(
+            status="ok" if model else "unavailable",
+            model_name=model.name if model else None,
+            model_version=model.version if model else None,
+            database=database_status(request),
+        )
+        code = status.HTTP_200_OK if model else status.HTTP_503_SERVICE_UNAVAILABLE
+        return JSONResponse(body.model_dump(), status_code=code)
 
     @app.post(
         "/predict",
         response_model=PredictResponse,
         responses={422: {"description": "Invalid readings"}, 503: {"description": "No model"}},
+        tags=["stateless"],
     )
     def predict(body: PredictRequest, model: ModelDep) -> PredictResponse:
-        """Predict RUL at the last reading. A sync ``def``: FastAPI runs it in a worker thread,
-        so CPU-bound prediction does not block the server."""
+        """Predict RUL at the last reading; nothing is stored. A sync ``def``: FastAPI runs it
+        in a worker thread, so CPU-bound prediction does not block the server."""
         history = pd.DataFrame([r.model_dump() for r in body.readings])
         history.insert(0, "unit", body.unit_id)
-        try:
-            result = model.predictor.predict_engine(history)
-        except InvalidHistoryError as exc:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        result = _predict(model, history)
         return PredictResponse(
             unit_id=body.unit_id,
             rul=result.rul,
@@ -107,7 +181,74 @@ def create_app(load_model: ModelLoader = load_from_registry) -> FastAPI:
             model_version=model.version,
         )
 
+    @app.post(
+        "/units/{unit_id}/readings",
+        response_model=ReadingsStored,
+        status_code=status.HTTP_201_CREATED,
+        responses={409: {"description": "Cycle already stored"}, 503: {"description": "No DB"}},
+        tags=["units"],
+    )
+    def store_readings(unit_id: UnitId, body: ReadingsBatch, session: SessionDep) -> ReadingsStored:
+        """Store readings for a unit, all or nothing. 409 if any cycle is already stored."""
+        try:
+            n = repository.add_readings(session, unit_id, [r.model_dump() for r in body.readings])
+        except repository.DuplicateCyclesError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        total, last_cycle = repository.count_readings(session, unit_id)
+        return ReadingsStored(unit_id=unit_id, n_stored=n, n_total=total, last_cycle=last_cycle)
+
+    @app.get(
+        "/units/{unit_id}/prediction",
+        response_model=UnitPrediction,
+        responses={404: {"description": "Unknown unit"}, 503: {"description": "No model/DB"}},
+        tags=["units"],
+    )
+    def predict_unit(unit_id: UnitId, model: ModelDep, session: SessionDep) -> UnitPrediction:
+        """Predict from all stored readings of the unit, store the prediction and return it."""
+        history = repository.get_history(session, unit_id)
+        if history.empty:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail=f"unit {unit_id} has no stored readings"
+            )
+        result = _predict(model, history)
+        row = repository.add_prediction(
+            session,
+            unit_id=unit_id,
+            cycle=int(history["cycle"].iloc[-1]),
+            rul=result.rul,
+            lower=result.lower,
+            upper=result.upper,
+            model_name=model.name,
+            model_version=model.version,
+        )
+        stored = StoredPrediction.model_validate(row)
+        return UnitPrediction(**stored.model_dump(), n_cycles_seen=result.n_cycles_seen)
+
+    @app.get(
+        "/units/{unit_id}/predictions",
+        response_model=list[StoredPrediction],
+        responses={404: {"description": "Unknown unit"}, 503: {"description": "No DB"}},
+        tags=["units"],
+    )
+    def prediction_history(
+        unit_id: UnitId,
+        session: SessionDep,
+        limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+    ) -> list[StoredPrediction]:
+        """The unit's stored predictions, newest first."""
+        if not repository.unit_known(session, unit_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"unit {unit_id} is unknown")
+        rows = repository.list_predictions(session, unit_id, limit)
+        return [StoredPrediction.model_validate(r) for r in rows]
+
     return app
 
 
-app = create_app()
+def _predict(model: LoadedModel, history: pd.DataFrame):
+    try:
+        return model.predictor.predict_engine(history)
+    except InvalidHistoryError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+
+app = create_app(database_url=get_database_url())

@@ -75,7 +75,12 @@ def client_without_model():
 def test_health_reports_model(client: TestClient) -> None:
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok", "model_name": "rul-lgbm-fd001", "model_version": "3"}
+    assert r.json() == {
+        "status": "ok",
+        "model_name": "rul-lgbm-fd001",
+        "model_version": "3",
+        "database": "not configured",
+    }
 
 
 def test_health_is_503_without_model(client_without_model: TestClient) -> None:
@@ -229,3 +234,35 @@ def test_real_predictor_behind_the_api() -> None:
     body = r.json()
     assert body["n_cycles_seen"] == 40
     assert 0 <= body["lower"] <= body["rul"] <= body["upper"]
+
+
+# --- database endpoints without a database (DB-free) ----------------------------------------
+
+
+def test_unit_endpoints_are_503_without_database(client: TestClient) -> None:
+    body = {"readings": [reading(1)]}
+    for method, url, kwargs in (
+        ("post", "/units/5/readings", {"json": body}),
+        ("get", "/units/5/prediction", {}),
+        ("get", "/units/5/predictions", {}),
+    ):
+        r = getattr(client, method)(url, **kwargs)
+        assert r.status_code == 503, url
+        assert "DATABASE_URL" in r.json()["detail"]
+
+
+def test_unreachable_database_gives_503_not_500(fake: FakePredictor) -> None:
+    # Nothing listens on port 1: the connection is refused immediately.
+    url = "postgresql+psycopg://user:pw@127.0.0.1:1/none"
+    app = create_app(lambda: LoadedModel(fake, "m", "1"), database_url=url)
+    with TestClient(app) as c:
+        health = c.get("/health")
+        assert health.status_code == 200  # the model is fine; /predict still works
+        assert health.json()["database"] == "unavailable"
+        r = c.post("/units/5/readings", json={"readings": [reading(1)]})
+    assert r.status_code == 503
+    assert "Database unavailable" in r.json()["detail"]
+
+
+def test_stateless_predict_works_without_database(client: TestClient) -> None:
+    assert client.post("/predict", json=request_body(2)).status_code == 200

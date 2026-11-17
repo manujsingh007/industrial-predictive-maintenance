@@ -6,6 +6,7 @@ accepts the full raw record so clients can send readings exactly as the engine p
 """
 
 from collections import Counter
+from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -50,12 +51,11 @@ class SensorReading(BaseModel):
     s_21: float
 
 
-class PredictRequest(BaseModel):
-    """One engine's readings, oldest first; RUL is predicted at the last reading."""
+class ReadingsBatch(BaseModel):
+    """1 to ``MAX_READINGS`` readings of one engine, sorted by strictly increasing cycle."""
 
     model_config = ConfigDict(extra="forbid")
 
-    unit_id: int = Field(ge=1, description="Engine identifier")
     readings: list[SensorReading] = Field(
         min_length=1,
         max_length=MAX_READINGS,
@@ -63,7 +63,7 @@ class PredictRequest(BaseModel):
     )
 
     @model_validator(mode="after")
-    def cycles_strictly_increasing(self) -> "PredictRequest":
+    def cycles_strictly_increasing(self) -> "ReadingsBatch":
         cycles = [r.cycle for r in self.readings]
         duplicates = sorted(c for c, n in Counter(cycles).items() if n > 1)
         if duplicates:
@@ -71,6 +71,12 @@ class PredictRequest(BaseModel):
         if any(b <= a for a, b in zip(cycles, cycles[1:], strict=False)):
             raise ValueError("readings must be sorted by strictly increasing cycle")
         return self
+
+
+class PredictRequest(ReadingsBatch):
+    """One engine's readings, oldest first; RUL is predicted at the last reading."""
+
+    unit_id: int = Field(ge=1, description="Engine identifier")
 
 
 class PredictResponse(BaseModel):
@@ -86,8 +92,43 @@ class PredictResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """Service status; ``model_name``/``model_version`` are null when no model is loaded."""
+    """Service status; ``model_name``/``model_version`` are null when no model is loaded.
+
+    ``database`` is "ok", "unavailable" or "not configured".
+    """
 
     status: str
     model_name: str | None = None
     model_version: str | None = None
+    database: str = "not configured"
+
+
+class ReadingsStored(BaseModel):
+    """Result of storing readings for a unit."""
+
+    unit_id: int
+    n_stored: int = Field(description="Readings stored by this request")
+    n_total: int = Field(description="Readings now stored for this unit")
+    last_cycle: int
+
+
+class StoredPrediction(BaseModel):
+    """A prediction as stored in the ``predictions`` table."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    unit_id: int
+    cycle: int = Field(description="Last stored cycle the prediction is based on")
+    rul: float
+    lower: float
+    upper: float
+    model_name: str
+    model_version: str
+    created_at: datetime
+
+
+class UnitPrediction(StoredPrediction):
+    """A new prediction from a unit's stored history."""
+
+    n_cycles_seen: int = Field(description="Stored readings the prediction is based on")
