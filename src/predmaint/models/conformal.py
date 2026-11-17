@@ -99,3 +99,79 @@ def interval(pred: ArrayLike, q: float) -> tuple[NDArray[np.float64], NDArray[np
     """Symmetric interval ``[pred - q, pred + q]``, with the lower bound clipped at 0 (RUL >= 0)."""
     p = np.asarray(pred, dtype=float)
     return np.maximum(p - q, 0.0), p + q
+
+
+# --- Mondrian (group-conditional) split conformal --------------------------------------------
+
+MONDRIAN_EDGES = (0.0, 30.0, 60.0, 90.0, math.inf)
+MIN_BIN_CALIBRATION = 50
+"""Fewest calibration rows for a bin to get its own q; smaller bins use the global q.
+
+With alpha = 0.1 a bin needs at least 9 rows for any finite q, but then q is essentially its
+largest residual. 50 rows is a pragmatic floor below which a per-bin quantile is too noisy
+to beat the global one.
+"""
+
+
+def mondrian_bins(pred: ArrayLike, edges: tuple[float, ...] = MONDRIAN_EDGES) -> np.ndarray:
+    """Bin index of each **predicted** RUL; bins are left-closed, e.g. [0, 30), [30, 60).
+
+    Bins must use the prediction, not the true RUL: a new engine's true RUL is unknown when its
+    interval is needed, and the per-bin guarantee requires that bin membership does not depend
+    on the label. Predictions below the first edge go into the first bin.
+    """
+    if len(edges) < 2 or list(edges) != sorted(edges):
+        raise ValueError(f"edges must be increasing with at least two values, got {edges}")
+    return np.searchsorted(np.asarray(edges[1:-1]), np.asarray(pred, dtype=float), side="right")
+
+
+def mondrian_bin_labels(edges: tuple[float, ...] = MONDRIAN_EDGES) -> list[str]:
+    """Readable labels such as "0-30" and "90+"."""
+    return [
+        f"{lo:g}+" if math.isinf(hi) else f"{lo:g}-{hi:g}"
+        for lo, hi in zip(edges[:-1], edges[1:], strict=True)
+    ]
+
+
+def mondrian_quantiles(
+    residuals: ArrayLike,
+    pred: ArrayLike,
+    alpha: float = 0.1,
+    edges: tuple[float, ...] = MONDRIAN_EDGES,
+    min_bin_size: int = MIN_BIN_CALIBRATION,
+) -> tuple[np.ndarray, np.ndarray]:
+    """One split-conformal q per predicted-RUL bin, from absolute calibration residuals.
+
+    Args:
+        residuals: Calibration residuals ``y_true - y_pred`` (sign is ignored).
+        pred: Calibration predictions, which decide each residual's bin.
+        alpha: Miscoverage rate in (0, 1).
+        edges: Bin edges on the predicted RUL.
+        min_bin_size: Bins with fewer calibration rows fall back to the global q.
+
+    Returns:
+        ``(q_per_bin, used_fallback)``, both of length ``len(edges) - 1``.
+    """
+    scores = np.abs(np.asarray(residuals, dtype=float))
+    bins = mondrian_bins(pred, edges)
+    if len(scores) != len(bins):
+        raise ValueError("residuals and pred must have the same length")
+    global_q = conformal_score_quantile(scores, alpha)
+    n_bins = len(edges) - 1
+    q = np.full(n_bins, global_q)
+    fallback = np.ones(n_bins, dtype=bool)
+    for b in range(n_bins):
+        in_bin = scores[bins == b]
+        if len(in_bin) >= min_bin_size:
+            q[b] = conformal_score_quantile(in_bin, alpha)
+            fallback[b] = False
+    return q, fallback
+
+
+def mondrian_interval(
+    pred: ArrayLike, q_per_bin: ArrayLike, edges: tuple[float, ...] = MONDRIAN_EDGES
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Interval ``pred ± q[bin(pred)]``, lower bound clipped at 0."""
+    q_row = np.asarray(q_per_bin, dtype=float)[mondrian_bins(pred, edges)]
+    p = np.asarray(pred, dtype=float)
+    return np.maximum(p - q_row, 0.0), p + q_row

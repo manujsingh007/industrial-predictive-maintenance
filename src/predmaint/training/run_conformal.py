@@ -1,12 +1,13 @@
 """Evaluate conformal RUL intervals for the primary model (ADR 0002) with cross-fold calibration.
 
-Run with: ``uv run python -m predmaint.training.run_conformal --subset FD001 [--method both]``
+Run with: ``uv run python -m predmaint.training.run_conformal --subset FD001 [--method all]``
 
 Model and features follow ADR 0002: LightGBM on causal window features (windows 10 and 30),
 target capped at 125. Two methods are compared:
 
 - ``split``: split conformal around the point model's prediction (constant width).
 - ``cqr``: conformalized quantile regression on two LightGBM quantile models (adaptive width).
+- ``mondrian``: split conformal with one q per predicted-RUL bin (width depends on the bin).
 
 Every model is cross-validated on the same seed-42 engine folds. Only training data is used;
 the test files are never read.
@@ -22,7 +23,7 @@ from sklearn.base import RegressorMixin
 from predmaint.data.load import add_rul, load_train
 from predmaint.evaluation.coverage import CoverageReport, coverage_metrics, cross_fold_coverage
 from predmaint.features.selection import DEFAULT_RUL_CAP, SUBSETS_WITH_ADR
-from predmaint.models.conformal import CQR_QUANTILES
+from predmaint.models.conformal import CQR_QUANTILES, MIN_BIN_CALIBRATION, mondrian_bin_labels
 from predmaint.models.gbdt import make_lgbm, make_lgbm_quantile
 from predmaint.training.cv import MAX_EVAL_RUL, CVResult, cross_validate
 from predmaint.training.run_cv import (
@@ -37,8 +38,9 @@ MODEL_NAME = "LightGBM"
 MODEL_FACTORY: Callable[[], RegressorMixin] = make_lgbm
 QUANTILE_FACTORY: Callable[[float], RegressorMixin] = make_lgbm_quantile
 DEFAULT_ALPHA = 0.1
-METHOD_CHOICES = ("split", "cqr", "both")
-METHOD_LABELS = {"split": "split conformal", "cqr": "CQR"}
+METHOD_CHOICES = ("split", "cqr", "mondrian", "both", "all")
+METHOD_GROUPS = {"both": ["split", "cqr"], "all": ["split", "cqr", "mondrian"]}
+METHOD_LABELS = {"split": "split", "cqr": "CQR", "mondrian": "Mondrian"}
 
 
 @dataclass
@@ -48,7 +50,7 @@ class ConformalRun:
     Attributes:
         point: CV result of the point model; its ``oof`` gains ``lo``/``hi`` columns when CQR
             is evaluated.
-        reports: Coverage report per evaluated method (``"split"``, ``"cqr"``).
+        reports: Coverage report per evaluated method (``"split"``, ``"cqr"``, ``"mondrian"``).
         run_ids: MLflow run id per method (empty when not logged).
     """
 
@@ -80,7 +82,7 @@ def run(
     subset: str,
     alpha: float = DEFAULT_ALPHA,
     *,
-    method: str = "both",
+    method: str = "all",
     log: bool = True,
     tracking_uri: str | None = None,
 ) -> ConformalRun:
@@ -91,7 +93,7 @@ def run(
     """
     if method not in METHOD_CHOICES:
         raise ValueError(f"unknown method {method!r}; expected one of {METHOD_CHOICES}")
-    methods = ["split", "cqr"] if method == "both" else [method]
+    methods = METHOD_GROUPS.get(method, [method])
 
     data, features = build_features(add_rul(load_train(subset)), "window", DEFAULT_WINDOWS)
     point = cross_validate(
@@ -120,6 +122,9 @@ def run(
             }
             if m == "cqr":
                 extra_params["cqr_quantiles"] = ",".join(map(str, CQR_QUANTILES))
+            if m == "mondrian":
+                extra_params["mondrian_bins"] = ",".join(mondrian_bin_labels())
+                extra_params["mondrian_min_bin_size"] = MIN_BIN_CALIBRATION
             run_ids[m] = log_cv_result(
                 point,
                 model_name=MODEL_NAME,
@@ -133,37 +138,55 @@ def run(
 
 
 def format_per_fold(report: CoverageReport) -> str:
-    """Per-fold table for one method."""
+    """Per-fold table for one method; Mondrian adds one q column per predicted-RUL bin."""
     table = pd.DataFrame(
         {
             "fold": report.per_fold["fold"],
-            "q (cycles)": report.per_fold["q"].map("{:.2f}".format),
             "rows": report.per_fold["n"],
             "coverage": report.per_fold["coverage"].map("{:.1%}".format),
             "mean width": report.per_fold["mean_width"].map("{:.1f}".format),
         }
     )
-    return f"{METHOD_LABELS[report.method]}, per fold (q from the other folds):\n" + (
-        table.to_string(index=False)
+    if report.method == "mondrian":
+        q = report.q_by_bin.assign(
+            text=report.q_by_bin["q"].map("{:.2f}".format)
+            + report.q_by_bin["fallback"].map({True: "*", False: ""})
+        ).pivot(index="fold", columns="bin", values="text")
+        for label in mondrian_bin_labels():
+            table[f"q pred {label}"] = q[label].to_numpy()
+        note = "\n* bin had too few calibration rows; global q used"
+    else:
+        table.insert(1, "q", report.per_fold["q"].map("{:.2f}".format).to_numpy())
+        note = ""
+    return (
+        f"{METHOD_LABELS[report.method]}, per fold (q from the other folds):\n"
+        + table.to_string(index=False)
+        + (note if report.method == "mondrian" and report.q_by_bin["fallback"].any() else "")
     )
 
 
-def format_by_bucket(reports: dict[str, CoverageReport]) -> str:
-    """Coverage and mean width per true-RUL bucket, one column pair per method."""
-    first = next(iter(reports.values()))
-    table = pd.DataFrame({"true RUL": first.by_bucket["bucket"], "rows": first.by_bucket["n"]})
+def format_side_by_side(reports: dict[str, CoverageReport], by: str) -> str:
+    """Coverage and mean width per group, one column pair per method.
+
+    ``by`` is ``"bucket"`` (true RUL) or ``"pred_bin"`` (the point model's predicted RUL).
+    """
+    attr, title = {
+        "bucket": ("by_bucket", "By TRUE RUL"),
+        "pred_bin": ("by_pred_bin", "By PREDICTED RUL bin"),
+    }[by]
+    first = getattr(next(iter(reports.values())), attr)
+    label = "true RUL" if by == "bucket" else "predicted RUL"
+    table = pd.DataFrame({label: first[by], "rows": first["n"]})
     for m, report in reports.items():
-        label = METHOD_LABELS[m]
-        table[f"{label} coverage"] = report.by_bucket["coverage"].map("{:.1%}".format)
-        table[f"{label} width"] = report.by_bucket["mean_width"].map("{:.1f}".format)
-    overall = {"true RUL": "all", "rows": int(first.overall["n"])}
+        group = getattr(report, attr)
+        table[f"{METHOD_LABELS[m]} cov"] = group["coverage"].map("{:.1%}".format).to_numpy()
+        table[f"{METHOD_LABELS[m]} width"] = group["mean_width"].map("{:.1f}".format).to_numpy()
+    overall = {label: "all", "rows": int(next(iter(reports.values())).overall["n"])}
     for m, report in reports.items():
-        overall[f"{METHOD_LABELS[m]} coverage"] = f"{report.overall['coverage']:.1%}"
+        overall[f"{METHOD_LABELS[m]} cov"] = f"{report.overall['coverage']:.1%}"
         overall[f"{METHOD_LABELS[m]} width"] = f"{report.overall['mean_width']:.1f}"
     table = pd.concat([table, pd.DataFrame([overall])], ignore_index=True)
-    return "By true RUL (marginal guarantee only; buckets can differ):\n" + table.to_string(
-        index=False
-    )
+    return f"{title} (cov = coverage, width in cycles):\n" + table.to_string(index=False)
 
 
 def format_report(run_result: ConformalRun) -> str:
@@ -171,7 +194,8 @@ def format_report(run_result: ConformalRun) -> str:
     alpha = next(iter(run_result.reports.values())).alpha
     parts = [f"Target coverage: {1 - alpha:.0%} (alpha = {alpha:g}); widths in cycles"]
     parts += [format_per_fold(r) for r in run_result.reports.values()]
-    parts.append(format_by_bucket(run_result.reports))
+    parts.append(format_side_by_side(run_result.reports, "bucket"))
+    parts.append(format_side_by_side(run_result.reports, "pred_bin"))
     return "\n\n".join(parts)
 
 
@@ -183,7 +207,10 @@ def main() -> None:
         "--alpha", type=float, default=DEFAULT_ALPHA, help="miscoverage rate (0.1 = 90%%)"
     )
     parser.add_argument(
-        "--method", choices=METHOD_CHOICES, default="both", help="interval method(s) to evaluate"
+        "--method",
+        choices=METHOD_CHOICES,
+        default="all",
+        help="split, cqr, mondrian, both (split + cqr) or all three",
     )
     parser.add_argument("--no-mlflow", action="store_true", help="do not log runs to MLflow")
     args = parser.parse_args()

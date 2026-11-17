@@ -55,7 +55,7 @@ def test_split_only_without_logging(synthetic: None) -> None:
     assert len(report.per_fold) == 5
     assert 0 <= report.overall["coverage"] <= 1
     text = run_conformal.format_report(result)
-    assert "Target coverage: 90%" in text and "split conformal coverage" in text
+    assert "Target coverage: 90%" in text and "split cov" in text
 
 
 def test_both_methods_side_by_side(synthetic: None) -> None:
@@ -66,13 +66,8 @@ def test_both_methods_side_by_side(synthetic: None) -> None:
     # both methods are evaluated on exactly the same rows
     for m in ("split", "cqr"):
         assert result.reports[m].overall["n"] == result.reports["split"].overall["n"]
-    text = run_conformal.format_by_bucket(result.reports)
-    for column in (
-        "split conformal coverage",
-        "split conformal width",
-        "CQR coverage",
-        "CQR width",
-    ):
+    text = run_conformal.format_side_by_side(result.reports, "bucket")
+    for column in ("true RUL", "split cov", "split width", "CQR cov", "CQR width"):
         assert column in text
     assert "all" in text
 
@@ -97,3 +92,29 @@ def test_each_method_logged_as_its_own_run(synthetic: None, tmp_path: Path) -> N
 def test_unknown_method_raises(synthetic: None) -> None:
     with pytest.raises(ValueError, match="method"):
         run_conformal.run("FD001", method="bogus", log=False)
+
+
+def test_all_methods_by_true_and_predicted_rul(synthetic: None) -> None:
+    result = run_conformal.run("FD001", alpha=0.1, method="all", log=False)
+    assert set(result.reports) == {"split", "cqr", "mondrian"}
+    n = {m: r.overall["n"] for m, r in result.reports.items()}
+    assert len(set(n.values())) == 1  # same rows for every method
+    text = run_conformal.format_report(result)
+    assert "By TRUE RUL" in text and "By PREDICTED RUL bin" in text
+    assert "Mondrian cov" in text and "q pred 0-30" in text
+    # every method's predicted-bin table uses the same bins and row counts
+    counts = {m: r.by_pred_bin["n"].tolist() for m, r in result.reports.items()}
+    assert counts["split"] == counts["cqr"] == counts["mondrian"]
+
+
+def test_mondrian_logged_with_per_bin_q(synthetic: None, tmp_path: Path) -> None:
+    uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
+    result = run_conformal.run("FD001", alpha=0.1, method="mondrian", tracking_uri=uri)
+    client = MlflowClient(tracking_uri=uri)
+    run = client.get_run(result.run_ids["mondrian"])
+    assert run.data.params["conformal_method"] == "mondrian"
+    assert run.data.params["mondrian_bins"] == "0-30,30-60,60-90,90+"
+    assert run.data.params["mondrian_min_bin_size"] == "50"
+    history = client.get_metric_history(run.info.run_id, "conformal_q_bin_0_30_fold")
+    assert sorted(m.step for m in history) == [0, 1, 2, 3, 4]
+    assert "conformal_coverage_pred_90_plus" in run.data.metrics

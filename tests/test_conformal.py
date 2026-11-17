@@ -13,6 +13,10 @@ from predmaint.models.conformal import (
     cqr_interval,
     cqr_scores,
     interval,
+    mondrian_bin_labels,
+    mondrian_bins,
+    mondrian_interval,
+    mondrian_quantiles,
 )
 from predmaint.models.gbdt import make_lgbm_quantile
 
@@ -234,3 +238,95 @@ def test_cqr_requires_lo_hi_and_known_method() -> None:
         cross_fold_coverage(oof, 0.1, method="cqr")
     with pytest.raises(ValueError, match="method"):
         cross_fold_coverage(oof, 0.1, method="bogus")
+
+
+# --- Mondrian ---------------------------------------------------------------------------------
+
+
+def test_mondrian_bins_use_left_closed_edges() -> None:
+    bins = mondrian_bins([-5, 0, 29.9, 30, 59, 60, 90, 500])
+    assert bins.tolist() == [0, 0, 0, 1, 1, 2, 3, 3]
+    assert mondrian_bin_labels() == ["0-30", "30-60", "60-90", "90+"]
+
+
+def mondrian_data(n: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    """Predictions spread over all bins; error sd 2 below 30 cycles, 6, 10, then 20 above 90."""
+    pred = rng.uniform(0, 150, n)
+    sd = np.select([pred < 30, pred < 60, pred < 90], [2.0, 6.0, 10.0], 20.0)
+    return pred, pred + sd * rng.normal(size=n)  # (pred, true RUL); RUL may dip below 0
+
+
+def test_per_bin_q_grows_with_bin_errors() -> None:
+    pred, y = mondrian_data(20_000, np.random.default_rng(7))
+    q, fallback = mondrian_quantiles(y - pred, pred, alpha=0.1)
+    assert not fallback.any()
+    assert q[0] < q[1] < q[2] < q[3]
+    # 90% two-sided normal quantile is 1.645 sd
+    np.testing.assert_allclose(q, 1.645 * np.array([2.0, 6.0, 10.0, 20.0]), rtol=0.08)
+
+
+def test_mondrian_coverage_close_to_90_within_each_predicted_bin() -> None:
+    rng = np.random.default_rng(8)
+    cal_pred, cal_y = mondrian_data(20_000, rng)
+    q, _ = mondrian_quantiles(cal_y - cal_pred, cal_pred, alpha=0.1)
+    pred, y = mondrian_data(20_000, rng)
+    # compare unclipped intervals: true RUL can dip below 0 in this synthetic data
+    q_row = q[mondrian_bins(pred)]
+    covered = np.abs(y - pred) <= q_row
+    for b in range(4):
+        assert covered[mondrian_bins(pred) == b].mean() == pytest.approx(0.9, abs=0.02)
+
+
+def test_split_misses_per_bin_coverage_that_mondrian_achieves() -> None:
+    rng = np.random.default_rng(9)
+    pred, y = mondrian_data(10_000, rng)
+    oof = pd.DataFrame({"fold": np.repeat(np.arange(5), 2_000), "rul": y + 20, "pred": pred + 20})
+    split = cross_fold_coverage(oof, 0.1, method="split", max_eval_rul=1e9)
+    mondrian = cross_fold_coverage(oof, 0.1, method="mondrian", max_eval_rul=1e9)
+    worst = lambda r: (r.by_pred_bin["coverage"] - 0.9).abs().max()  # noqa: E731
+    assert worst(mondrian) < 0.03
+    assert worst(split) > 0.05  # one global width over-covers quiet bins, under-covers noisy
+
+
+def test_mondrian_falls_back_to_global_q_for_small_bins() -> None:
+    rng = np.random.default_rng(10)
+    pred = np.r_[rng.uniform(0, 29, 30), rng.uniform(30, 150, 2_000)]  # bin 0 has 30 rows
+    residuals = np.r_[np.full(30, 100.0), rng.normal(0, 5, 2_000)]
+    q, fallback = mondrian_quantiles(residuals, pred, alpha=0.1, min_bin_size=50)
+    global_q = conformal_quantile(residuals, alpha=0.1)
+    assert fallback.tolist() == [True, False, False, False]
+    assert q[0] == global_q  # not ~100, which bin 0's own 30 rows would give
+    q, fallback = mondrian_quantiles(residuals, pred, alpha=0.1, min_bin_size=20)
+    assert not fallback[0] and q[0] == 100.0
+
+
+def test_mondrian_interval_uses_each_rows_bin_and_clips() -> None:
+    lower, upper = mondrian_interval([10.0, 45.0, 120.0], q_per_bin=[15.0, 5.0, 8.0, 30.0])
+    assert lower.tolist() == [0.0, 40.0, 90.0]
+    assert upper.tolist() == [25.0, 50.0, 150.0]
+
+
+def test_cross_fold_mondrian_reports_q_per_fold_and_bin() -> None:
+    rng = np.random.default_rng(11)
+    pred, y = mondrian_data(10_000, rng)
+    oof = pd.DataFrame({"fold": np.repeat(np.arange(5), 2_000), "rul": y + 20, "pred": pred + 20})
+    report = cross_fold_coverage(oof, 0.1, method="mondrian", max_eval_rul=1e9)
+    assert len(report.q_by_bin) == 5 * 4
+    assert report.per_fold["q"].isna().all()
+    metrics = coverage_metrics(report)
+    assert len(metrics["conformal_q_bin_90_plus_fold"]) == 5
+
+
+def test_mondrian_bins_calibration_rows_by_prediction_not_truth() -> None:
+    # Every prediction is in bin 0-30 while true RUL spreads over 0-150. Binning by the
+    # prediction gives bin 0 all calibration rows; binning by truth would leave it ~20% and
+    # starve it below the threshold in small folds, forcing the global fallback.
+    rng = np.random.default_rng(12)
+    rul = rng.uniform(0, 150, 300)
+    oof = pd.DataFrame(
+        {"fold": np.repeat(np.arange(5), 60), "rul": rul, "pred": np.full(300, 10.0)}
+    )
+    report = cross_fold_coverage(oof, 0.1, method="mondrian", min_bin_size=200)
+    bin0 = report.q_by_bin[report.q_by_bin["bin"] == "0-30"]
+    assert (bin0["n_calibration"] == 240).all()
+    assert not bin0["fallback"].any()
