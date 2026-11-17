@@ -132,3 +132,39 @@ def log_cv_result(
         raise
     client.set_terminated(run_id)
     return run_id
+
+
+def log_run(
+    *,
+    run_name: str,
+    experiment_name: str,
+    params: Mapping[str, object],
+    metrics: Mapping[str, float],
+    tags: Mapping[str, str] | None = None,
+    artifacts: Sequence[Path] = (),
+    tracking_uri: str = TRACKING_URI,
+    artifact_location: str = ARTIFACT_ROOT,
+) -> str:
+    """Log one finished run with params, scalar metrics, tags (plus git tags) and artifact files.
+
+    Returns:
+        The MLflow run id.
+    """
+    client = MlflowClient(tracking_uri=tracking_uri)
+    experiment_id = _get_or_create_experiment(client, experiment_name, artifact_location)
+    run_id = client.create_run(experiment_id, run_name=run_name).info.run_id
+    now = int(time.time() * 1000)
+    try:
+        client.log_batch(
+            run_id,
+            metrics=[Metric(k, float(v), now, 0) for k, v in metrics.items()],
+            params=[Param(k, str(v)) for k, v in params.items()],
+            tags=[RunTag(k, str(v)) for k, v in {**git_tags(), **(tags or {})}.items()],
+        )
+        for path in artifacts:
+            client.log_artifact(run_id, str(path))
+    except Exception:
+        client.set_terminated(run_id, status="FAILED")
+        raise
+    client.set_terminated(run_id)
+    return run_id

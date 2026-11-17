@@ -89,3 +89,41 @@ def bootstrap_ci(
     stats = np.array([metric(t[idx], p[idx]) for idx in indices])
     low, high = np.percentile(stats, [2.5, 97.5])
     return metric(t, p), float(low), float(high)
+
+
+def paired_bootstrap_diff(
+    metric: Metric,
+    y_true: ArrayLike,
+    pred_a: ArrayLike,
+    pred_b: ArrayLike,
+    n_resamples: int = 10_000,
+    seed: int = 42,
+) -> tuple[float, float, float]:
+    """95% bootstrap interval of ``metric(a) - metric(b)``, resampling the SAME engines for both.
+
+    Pairing matters: two models evaluated on the same engines share the hard and easy engines.
+    Resampling both with the same indices cancels that shared difficulty, so the interval of
+    the difference is much narrower than one built from two independent intervals. Comparing
+    whether two separate intervals overlap is not a valid test.
+
+    Args:
+        metric: Function ``metric(y_true, y_pred) -> float``, e.g. :func:`rmse`.
+        y_true: True RUL, one value per engine.
+        pred_a: Predictions of model A, one per engine.
+        pred_b: Predictions of model B, one per engine.
+        n_resamples: Number of bootstrap resamples.
+        seed: Seed for the random generator.
+
+    Returns:
+        ``(point, low, high)``: the observed difference and its 2.5th / 97.5th percentiles.
+        An interval entirely below 0 means A has a lower (better, for error metrics) score.
+    """
+    t, a = _as_pair(y_true, pred_a)
+    _, b = _as_pair(y_true, pred_b)
+    if n_resamples < 1:
+        raise ValueError("n_resamples must be at least 1")
+    rng = np.random.default_rng(seed)
+    indices = rng.integers(0, t.size, size=(n_resamples, t.size))
+    stats = np.array([metric(t[idx], a[idx]) - metric(t[idx], b[idx]) for idx in indices])
+    low, high = np.percentile(stats, [2.5, 97.5])
+    return metric(t, a) - metric(t, b), float(low), float(high)
