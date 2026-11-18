@@ -97,13 +97,17 @@ def _status_style(column: pd.Series) -> list[str]:
 
 
 st.subheader("Fleet ranked by risk")
-styled = (
-    table.style.apply(_status_style, subset=["status"])
-    .format({"status": lambda s: STATUS_LABELS[s]})
-    .format({"RUL": "{:.1f}", "lower": "{:.1f}", "upper": "{:.1f}"}, na_rep="–")
-    .format({"predicted at cycle": "{:.0f}"}, na_rep="–")
-    .format({"stale": lambda s: "yes" if s else ""})
-)
+# One .format call with every column's formatter: separate chained calls did not all reach
+# the rendered table (RUL/lower/upper were shown unrounded).
+TABLE_FORMAT = {
+    "status": lambda s: STATUS_LABELS[s],
+    "RUL": "{:.1f}",
+    "lower": "{:.1f}",
+    "upper": "{:.1f}",
+    "predicted at cycle": "{:.0f}",
+    "stale": lambda s: "yes" if s else "",
+}
+styled = table.style.apply(_status_style, subset=["status"]).format(TABLE_FORMAT, na_rep="–")
 st.dataframe(styled, hide_index=True, width="stretch")
 st.caption(
     "Sorted by the interval's lower bound (most at risk first). RUL, lower and upper are in "
