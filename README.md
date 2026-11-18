@@ -145,6 +145,9 @@ uv run uvicorn predmaint.serving.api:app
 
 # 5. In a second terminal: replay test engines as if they were live
 uv run python -m predmaint.simulation.replay --subset FD001 --units 1-10 --predict-every 10
+
+# 6. In a third terminal: the fleet dashboard (opens http://localhost:8501)
+uv run --group dashboard streamlit run src/predmaint/dashboard/app.py
 ```
 
 - **The replay** sends each engine's readings in cycle order and asks for a prediction every 10
@@ -153,6 +156,13 @@ uv run python -m predmaint.simulation.replay --subset FD001 --units 1-10 --predi
   are skipped.
 - **No label leakage:** the replay never reads the true-RUL file, so no labels reach the service.
 - **Results:** `GET /units/{id}/predictions` returns a unit's prediction history.
+- **Dashboard:** it reads only from the API. The default is http://127.0.0.1:8000; set
+  `PREDMAINT_API_URL` to use another one.
+  - The fleet table ranks units by the **lower bound** of their 90% interval (critical below 20
+    cycles, warning below 50; both adjustable in the sidebar).
+  - Selecting a unit shows its predicted RUL with the interval band and four key sensors.
+  - Press **Refresh** after new data arrives.
+  - True RUL is never shown: an operator would not know it.
 - **Stopping:** `docker compose down` stops PostgreSQL; the data stays in a Docker volume.
 
 On macOS, if `docker` is not found although Docker Desktop is running, add its tools to your

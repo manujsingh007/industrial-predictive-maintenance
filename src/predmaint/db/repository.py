@@ -109,3 +109,106 @@ def unit_summary(session: Session, unit_id: int) -> dict[str, int | None]:
         "n_predictions": int(n_predictions),
         "last_prediction_cycle": last_prediction_cycle,
     }
+
+
+def list_units(session: Session) -> list[dict]:
+    """Every unit with stored readings: count, last cycle and its latest prediction (or None).
+
+    One query: readings are aggregated per unit, and each unit's newest prediction is picked
+    with a window function (row_number over created_at, then id), then left-joined.
+    """
+    readings = (
+        select(
+            SensorReadingRow.unit_id,
+            func.count().label("n_readings"),
+            func.max(SensorReadingRow.cycle).label("last_cycle"),
+        )
+        .group_by(SensorReadingRow.unit_id)
+        .subquery()
+    )
+    ranked = select(
+        PredictionRow,
+        func.row_number()
+        .over(
+            partition_by=PredictionRow.unit_id,
+            order_by=(PredictionRow.created_at.desc(), PredictionRow.id.desc()),
+        )
+        .label("rank"),
+    ).subquery()
+    latest = select(ranked).where(ranked.c.rank == 1).subquery()
+    rows = session.execute(
+        select(
+            readings.c.unit_id,
+            readings.c.n_readings,
+            readings.c.last_cycle,
+            latest.c.rul,
+            latest.c.lower,
+            latest.c.upper,
+            latest.c.cycle,
+            latest.c.created_at,
+        )
+        .outerjoin(latest, latest.c.unit_id == readings.c.unit_id)
+        .order_by(readings.c.unit_id)
+    ).all()
+    return [
+        {
+            "unit_id": r.unit_id,
+            "n_readings": r.n_readings,
+            "last_cycle": r.last_cycle,
+            "latest_prediction": None
+            if r.rul is None
+            else {
+                "rul": r.rul,
+                "lower": r.lower,
+                "upper": r.upper,
+                "cycle": r.cycle,
+                "created_at": r.created_at,
+            },
+        }
+        for r in rows
+    ]
+
+
+def get_readings(
+    session: Session, unit_id: int, limit: int | None = None
+) -> list[SensorReadingRow]:
+    """A unit's stored readings in cycle order; with ``limit``, only the most recent ones."""
+    query = select(SensorReadingRow).where(SensorReadingRow.unit_id == unit_id)
+    if limit is None:
+        return list(session.scalars(query.order_by(SensorReadingRow.cycle)).all())
+    newest = session.scalars(query.order_by(SensorReadingRow.cycle.desc()).limit(limit)).all()
+    return list(reversed(newest))
+
+
+class Repository:
+    """The API's view of the database. A FastAPI dependency, so unit tests can use a fake."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def add_readings(self, unit_id: int, readings: Sequence[dict]) -> int:
+        return add_readings(self.session, unit_id, readings)
+
+    def count_readings(self, unit_id: int) -> tuple[int, int | None]:
+        return count_readings(self.session, unit_id)
+
+    def get_history(self, unit_id: int) -> pd.DataFrame:
+        return get_history(self.session, unit_id)
+
+    def add_prediction(self, **values: object) -> PredictionRow:
+        return add_prediction(self.session, **values)
+
+    def list_predictions(self, unit_id: int, limit: int = 100) -> list[PredictionRow]:
+        return list_predictions(self.session, unit_id, limit)
+
+    def unit_known(self, unit_id: int) -> bool:
+        return unit_known(self.session, unit_id)
+
+    def unit_summary(self, unit_id: int) -> dict[str, int | None]:
+        return unit_summary(self.session, unit_id)
+
+    def list_units(self) -> list[dict]:
+        return list_units(self.session)
+
+    def get_readings(self, unit_id: int, limit: int | None = None) -> list[SensorReadingRow]:
+        return get_readings(self.session, unit_id, limit)

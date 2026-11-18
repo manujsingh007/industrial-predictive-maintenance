@@ -205,3 +205,38 @@ def test_unit_summary_for_resuming(client: TestClient) -> None:
     client.get("/units/11/prediction")
     summary = client.get("/units/11").json()
     assert summary["n_predictions"] == 1 and summary["last_prediction_cycle"] == 25
+
+
+# --- GET /units and GET /units/{id}/readings ------------------------------------------------------
+
+
+def test_list_units_reports_latest_prediction_per_unit(client: TestClient) -> None:
+    assert client.get("/units").json() == []
+    client.post("/units/21/readings", json=readings(range(1, 11)))
+    client.post("/units/22/readings", json=readings(range(1, 31)))
+    client.get("/units/22/prediction")
+    client.post("/units/22/readings", json=readings(range(31, 41)))
+    newest = client.get("/units/22/prediction").json()
+
+    units = client.get("/units").json()
+    assert [u["unit_id"] for u in units] == [21, 22]
+    assert units[0] == {
+        "unit_id": 21,
+        "n_readings": 10,
+        "last_cycle": 10,
+        "latest_prediction": None,
+    }
+    latest = units[1]["latest_prediction"]
+    assert units[1]["n_readings"] == 40 and units[1]["last_cycle"] == 40
+    assert latest["cycle"] == 40 and latest["rul"] == pytest.approx(newest["rul"])
+    assert latest["created_at"] == newest["created_at"]
+
+
+def test_list_readings_order_limit_and_404(client: TestClient) -> None:
+    client.post("/units/23/readings", json=readings(range(1, 6)))
+    client.post("/units/23/readings", json=readings(range(6, 9)))
+    rows = client.get("/units/23/readings").json()
+    assert [r["cycle"] for r in rows] == list(range(1, 9))
+    assert rows[0]["s_2"] == pytest.approx(reading(1, 0.05)["s_2"])
+    assert [r["cycle"] for r in client.get("/units/23/readings?limit=3").json()] == [6, 7, 8]
+    assert client.get("/units/24/readings").status_code == 404

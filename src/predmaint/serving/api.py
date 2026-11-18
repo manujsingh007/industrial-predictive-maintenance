@@ -36,6 +36,8 @@ from predmaint.serving.schemas import (
     ReadingsBatch,
     ReadingsStored,
     StoredPrediction,
+    StoredReading,
+    UnitOverview,
     UnitPrediction,
     UnitSummary,
 )
@@ -82,6 +84,14 @@ def get_session(request: Request) -> Iterator[Session]:
 
 ModelDep = Annotated[LoadedModel, Depends(get_model)]
 SessionDep = Annotated[Session, Depends(get_session)]
+
+
+def get_repository(session: SessionDep) -> repository.Repository:
+    """FastAPI dependency: database operations for one request. Unit tests override it."""
+    return repository.Repository(session)
+
+
+RepoDep = Annotated[repository.Repository, Depends(get_repository)]
 
 
 def create_app(
@@ -189,13 +199,13 @@ def create_app(
         responses={409: {"description": "Cycle already stored"}, 503: {"description": "No DB"}},
         tags=["units"],
     )
-    def store_readings(unit_id: UnitId, body: ReadingsBatch, session: SessionDep) -> ReadingsStored:
+    def store_readings(unit_id: UnitId, body: ReadingsBatch, repo: RepoDep) -> ReadingsStored:
         """Store readings for a unit, all or nothing. 409 if any cycle is already stored."""
         try:
-            n = repository.add_readings(session, unit_id, [r.model_dump() for r in body.readings])
+            n = repo.add_readings(unit_id, [r.model_dump() for r in body.readings])
         except repository.DuplicateCyclesError as exc:
             raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-        total, last_cycle = repository.count_readings(session, unit_id)
+        total, last_cycle = repo.count_readings(unit_id)
         return ReadingsStored(unit_id=unit_id, n_stored=n, n_total=total, last_cycle=last_cycle)
 
     @app.get(
@@ -204,11 +214,11 @@ def create_app(
         responses={404: {"description": "Unknown unit"}, 503: {"description": "No DB"}},
         tags=["units"],
     )
-    def unit_status(unit_id: UnitId, session: SessionDep) -> UnitSummary:
+    def unit_status(unit_id: UnitId, repo: RepoDep) -> UnitSummary:
         """How many readings and predictions are stored for the unit (used to resume)."""
-        if not repository.unit_known(session, unit_id):
+        if not repo.unit_known(unit_id):
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"unit {unit_id} is unknown")
-        return UnitSummary(**repository.unit_summary(session, unit_id))
+        return UnitSummary(**repo.unit_summary(unit_id))
 
     @app.get(
         "/units/{unit_id}/prediction",
@@ -216,16 +226,15 @@ def create_app(
         responses={404: {"description": "Unknown unit"}, 503: {"description": "No model/DB"}},
         tags=["units"],
     )
-    def predict_unit(unit_id: UnitId, model: ModelDep, session: SessionDep) -> UnitPrediction:
+    def predict_unit(unit_id: UnitId, model: ModelDep, repo: RepoDep) -> UnitPrediction:
         """Predict from all stored readings of the unit, store the prediction and return it."""
-        history = repository.get_history(session, unit_id)
+        history = repo.get_history(unit_id)
         if history.empty:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, detail=f"unit {unit_id} has no stored readings"
             )
         result = _predict(model, history)
-        row = repository.add_prediction(
-            session,
+        row = repo.add_prediction(
             unit_id=unit_id,
             cycle=int(history["cycle"].iloc[-1]),
             rul=result.rul,
@@ -245,14 +254,45 @@ def create_app(
     )
     def prediction_history(
         unit_id: UnitId,
-        session: SessionDep,
+        repo: RepoDep,
         limit: Annotated[int, Query(ge=1, le=1000)] = 100,
     ) -> list[StoredPrediction]:
         """The unit's stored predictions, newest first."""
-        if not repository.unit_known(session, unit_id):
+        if not repo.unit_known(unit_id):
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"unit {unit_id} is unknown")
-        rows = repository.list_predictions(session, unit_id, limit)
+        rows = repo.list_predictions(unit_id, limit)
         return [StoredPrediction.model_validate(r) for r in rows]
+
+    @app.get(
+        "/units",
+        response_model=list[UnitOverview],
+        responses={503: {"description": "No DB"}},
+        tags=["units"],
+    )
+    def list_units(repo: RepoDep) -> list[UnitOverview]:
+        """Every unit with stored readings, its last cycle and its latest stored prediction."""
+        return [UnitOverview(**u) for u in repo.list_units()]
+
+    @app.get(
+        "/units/{unit_id}/readings",
+        response_model=list[StoredReading],
+        responses={404: {"description": "Unknown unit"}, 503: {"description": "No DB"}},
+        tags=["units"],
+    )
+    def list_readings(
+        unit_id: UnitId,
+        repo: RepoDep,
+        limit: Annotated[
+            int | None, Query(ge=1, le=10_000, description="Only the most recent N readings")
+        ] = None,
+    ) -> list[StoredReading]:
+        """The unit's stored readings in cycle order (all, or the most recent ``limit``)."""
+        rows = repo.get_readings(unit_id, limit)
+        if not rows:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail=f"unit {unit_id} has no stored readings"
+            )
+        return [StoredReading.model_validate(r) for r in rows]
 
     return app
 

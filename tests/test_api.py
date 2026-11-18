@@ -1,12 +1,15 @@
 """Tests for the FastAPI service with a fake predictor (no MLflow, no real data)."""
 
+from datetime import UTC, datetime
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
 from predmaint.data.load import SENSOR_COLUMNS, SETTING_COLUMNS
-from predmaint.serving.api import create_app, get_model
+from predmaint.serving.api import create_app, get_model, get_repository
 from predmaint.serving.predictor import InvalidHistoryError, RULPrediction
 from predmaint.serving.registry import LoadedModel
 from predmaint.serving.schemas import MAX_READINGS
@@ -267,3 +270,111 @@ def test_unreachable_database_gives_503_not_500(fake: FakePredictor) -> None:
 
 def test_stateless_predict_works_without_database(client: TestClient) -> None:
     assert client.post("/predict", json=request_body(2)).status_code == 200
+
+
+# --- /units endpoints with a FAKE repository (no database) -----------------------------------
+
+
+NOW = datetime(2026, 11, 18, 10, 0, tzinfo=UTC)
+
+
+class FakeRepository:
+    """In-memory stand-in for predmaint.db.repository.Repository."""
+
+    def __init__(self) -> None:
+        self.readings: dict[int, list[dict]] = {}
+        self.predictions: list[SimpleNamespace] = []
+
+    def get_readings(self, unit_id: int, limit: int | None = None) -> list[SimpleNamespace]:
+        rows = sorted(self.readings.get(unit_id, []), key=lambda r: r["cycle"])
+        rows = rows[-limit:] if limit else rows
+        return [SimpleNamespace(unit_id=unit_id, ingested_at=NOW, **r) for r in rows]
+
+    def list_units(self) -> list[dict]:
+        out = []
+        for unit_id in sorted(self.readings):
+            preds = [p for p in self.predictions if p.unit_id == unit_id]
+            latest = max(preds, key=lambda p: (p.created_at, p.id)) if preds else None
+            out.append(
+                {
+                    "unit_id": unit_id,
+                    "n_readings": len(self.readings[unit_id]),
+                    "last_cycle": max(r["cycle"] for r in self.readings[unit_id]),
+                    "latest_prediction": None
+                    if latest is None
+                    else {
+                        "rul": latest.rul,
+                        "lower": latest.lower,
+                        "upper": latest.upper,
+                        "cycle": latest.cycle,
+                        "created_at": latest.created_at,
+                    },
+                }
+            )
+        return out
+
+
+@pytest.fixture
+def repo_client(fake: FakePredictor):
+    repo = FakeRepository()
+    app = create_app(lambda: LoadedModel(fake, "m", "1"))
+    app.dependency_overrides[get_repository] = lambda: repo
+    with TestClient(app) as c:
+        yield c, repo
+
+
+def test_list_units_empty_fleet(repo_client) -> None:
+    client, _ = repo_client
+    r = client.get("/units")
+    assert r.status_code == 200 and r.json() == []
+
+
+def test_list_units_with_and_without_predictions(repo_client) -> None:
+    client, repo = repo_client
+    repo.readings[2] = [reading(c) for c in range(1, 4)]
+    repo.readings[5] = [reading(c) for c in range(1, 31)]
+    repo.predictions = [
+        SimpleNamespace(
+            id=1,
+            unit_id=5,
+            cycle=20,
+            rul=60.0,
+            lower=40.0,
+            upper=80.0,
+            created_at=NOW.replace(hour=9),
+        ),
+        SimpleNamespace(
+            id=2, unit_id=5, cycle=30, rul=50.0, lower=30.0, upper=70.0, created_at=NOW
+        ),
+    ]
+    units = client.get("/units").json()
+    assert [u["unit_id"] for u in units] == [2, 5]
+    assert units[0] == {"unit_id": 2, "n_readings": 3, "last_cycle": 3, "latest_prediction": None}
+    assert units[1]["latest_prediction"] == {
+        "rul": 50.0,
+        "lower": 30.0,
+        "upper": 70.0,
+        "cycle": 30,
+        "created_at": "2026-11-18T10:00:00Z",
+    }
+
+
+def test_list_readings_in_cycle_order_with_limit(repo_client) -> None:
+    client, repo = repo_client
+    repo.readings[4] = [reading(c) for c in (3, 1, 2, 5, 4)]
+    all_rows = client.get("/units/4/readings").json()
+    assert [r["cycle"] for r in all_rows] == [1, 2, 3, 4, 5]
+    assert set(all_rows[0]) == {
+        "unit_id",
+        "cycle",
+        "ingested_at",
+        *SETTING_COLUMNS,
+        *SENSOR_COLUMNS,
+    }
+    assert [r["cycle"] for r in client.get("/units/4/readings?limit=2").json()] == [4, 5]
+
+
+def test_list_readings_unknown_unit_and_bad_limit(repo_client) -> None:
+    client, _ = repo_client
+    assert client.get("/units/77/readings").status_code == 404
+    assert client.get("/units/4/readings?limit=0").status_code == 422

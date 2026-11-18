@@ -144,3 +144,33 @@ class UnitSummary(BaseModel):
     last_prediction_cycle: int | None = Field(
         description="Cycle of the most recent prediction's input; null if none"
     )
+
+
+class LatestPrediction(BaseModel):
+    """A unit's most recent stored prediction."""
+
+    rul: float
+    lower: float
+    upper: float
+    cycle: int = Field(description="Last stored cycle the prediction was based on")
+    created_at: datetime
+
+
+class UnitOverview(BaseModel):
+    """One row of the fleet overview."""
+
+    unit_id: int
+    n_readings: int
+    last_cycle: int
+    latest_prediction: LatestPrediction | None = Field(
+        description="Null if no prediction has been requested for this unit yet"
+    )
+
+
+class StoredReading(SensorReading):
+    """A stored reading, as returned by ``GET /units/{unit_id}/readings``."""
+
+    model_config = ConfigDict(from_attributes=True, extra="ignore")
+
+    unit_id: int
+    ingested_at: datetime
