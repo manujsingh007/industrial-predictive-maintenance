@@ -1,6 +1,7 @@
 """Database operations used by the API. Each function works inside the caller's session."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import pandas as pd
 from sqlalchemy import func, select
@@ -10,36 +11,66 @@ from sqlalchemy.orm import Session
 from predmaint.db.models import READING_VALUE_COLUMNS, PredictionRow, SensorReadingRow
 
 
-class DuplicateCyclesError(Exception):
-    """Some submitted cycles are already stored for this unit."""
+class ConflictingReadingsError(Exception):
+    """Some submitted cycles are already stored for this unit with DIFFERENT values."""
 
     def __init__(self, unit_id: int, cycles: Sequence[int]) -> None:
         self.unit_id, self.cycles = unit_id, sorted(cycles)
-        super().__init__(f"unit {unit_id} already has readings for cycles {self.cycles[:10]}")
+        shown = ", ".join(map(str, self.cycles[:10])) + (" ..." if len(self.cycles) > 10 else "")
+        super().__init__(
+            f"unit {unit_id} already has different readings for {len(self.cycles)} cycle(s): "
+            f"[{shown}]. Stored readings are never overwritten."
+        )
 
 
-def add_readings(session: Session, unit_id: int, readings: Sequence[dict]) -> int:
-    """Insert readings for one unit, all or nothing.
+@dataclass(frozen=True)
+class AddResult:
+    stored: int  # new readings inserted by this call
+    already_stored: int  # readings identical to ones already stored (no-op)
+
+
+def add_readings(session: Session, unit_id: int, readings: Sequence[dict]) -> AddResult:
+    """Insert readings for one unit, idempotently and all or nothing.
+
+    - A cycle that is not stored yet is inserted.
+    - A cycle already stored with **identical** values (all settings and sensors) is a no-op,
+      so a client can safely re-send a batch after a lost response.
+    - A cycle already stored with **different** values raises and nothing is inserted.
 
     Raises:
-        DuplicateCyclesError: If any cycle is already stored. Nothing is inserted. The unique
-            constraint also catches a concurrent insert between the check and the commit.
+        ConflictingReadingsError: If any submitted cycle conflicts with a stored reading.
     """
-    cycles = [int(r["cycle"]) for r in readings]
-    existing = session.scalars(
-        select(SensorReadingRow.cycle).where(
-            SensorReadingRow.unit_id == unit_id, SensorReadingRow.cycle.in_(cycles)
-        )
-    ).all()
-    if existing:
-        raise DuplicateCyclesError(unit_id, existing)
-    session.add_all(SensorReadingRow(unit_id=unit_id, **r) for r in readings)
-    try:
-        session.commit()
-    except IntegrityError as exc:
-        session.rollback()
-        raise DuplicateCyclesError(unit_id, cycles) from exc
-    return len(readings)
+    for attempt in range(2):
+        cycles = [int(r["cycle"]) for r in readings]
+        stored = {
+            row.cycle: row
+            for row in session.scalars(
+                select(SensorReadingRow).where(
+                    SensorReadingRow.unit_id == unit_id, SensorReadingRow.cycle.in_(cycles)
+                )
+            )
+        }
+        conflicts = [
+            r["cycle"]
+            for r in readings
+            if r["cycle"] in stored
+            and any(getattr(stored[r["cycle"]], c) != r[c] for c in READING_VALUE_COLUMNS)
+        ]
+        if conflicts:
+            raise ConflictingReadingsError(unit_id, conflicts)
+        new = [r for r in readings if r["cycle"] not in stored]
+        session.add_all(SensorReadingRow(unit_id=unit_id, **r) for r in new)
+        try:
+            session.commit()
+        except IntegrityError:
+            # Another request stored some of these cycles between the check and the commit.
+            # Look again once: identical rows are then a no-op, different ones a conflict.
+            session.rollback()
+            if attempt == 1:
+                raise
+            continue
+        return AddResult(stored=len(new), already_stored=len(readings) - len(new))
+    raise AssertionError("unreachable")
 
 
 def count_readings(session: Session, unit_id: int) -> tuple[int, int | None]:
@@ -186,7 +217,7 @@ class Repository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def add_readings(self, unit_id: int, readings: Sequence[dict]) -> int:
+    def add_readings(self, unit_id: int, readings: Sequence[dict]) -> AddResult:
         return add_readings(self.session, unit_id, readings)
 
     def count_readings(self, unit_id: int) -> tuple[int, int | None]:

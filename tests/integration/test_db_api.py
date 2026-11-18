@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from predmaint.data.load import SENSOR_COLUMNS, SETTING_COLUMNS
+from predmaint.db import repository
 from predmaint.db.models import Base, SensorReadingRow
 
 from .conftest import downgrade, fresh_schema, upgrade
@@ -80,18 +81,60 @@ def test_database_rejects_duplicate_unit_cycle(schema_url: str) -> None:
 def test_store_readings_and_accumulate(client: TestClient) -> None:
     r = client.post("/units/3/readings", json=readings(range(1, 11)))
     assert r.status_code == 201
-    assert r.json() == {"unit_id": 3, "n_stored": 10, "n_total": 10, "last_cycle": 10}
+    assert r.json() == {
+        "unit_id": 3,
+        "n_stored": 10,
+        "n_already_stored": 0,
+        "n_total": 10,
+        "last_cycle": 10,
+    }
     r = client.post("/units/3/readings", json=readings(range(11, 16)))
-    assert r.json() == {"unit_id": 3, "n_stored": 5, "n_total": 15, "last_cycle": 15}
+    assert r.json() == {
+        "unit_id": 3,
+        "n_stored": 5,
+        "n_already_stored": 0,
+        "n_total": 15,
+        "last_cycle": 15,
+    }
 
 
-def test_duplicate_cycles_give_409_and_store_nothing(client: TestClient) -> None:
-    client.post("/units/4/readings", json=readings(range(1, 6)))
-    r = client.post("/units/4/readings", json=readings(range(4, 9)))  # 4, 5 already stored
+def test_identical_resend_is_a_no_op(client: TestClient, schema_url: str) -> None:
+    first = client.post("/units/4/readings", json=readings(range(1, 6))).json()
+    again = client.post("/units/4/readings", json=readings(range(1, 6)))  # e.g. a client retry
+    assert again.status_code == 201
+    assert again.json() == {
+        "unit_id": 4,
+        "n_stored": 0,
+        "n_already_stored": 5,
+        "n_total": 5,
+        "last_cycle": 5,
+    }
+    overlap = client.post("/units/4/readings", json=readings(range(4, 9))).json()
+    assert (overlap["n_stored"], overlap["n_already_stored"], overlap["n_total"]) == (3, 2, 8)
+    assert first["n_stored"] == 5
+    engine = create_engine(schema_url)
+    with Session(engine) as session:  # each cycle stored exactly once, original ingestion time
+        assert len(repository.get_history(session, 4)) == 8
+    engine.dispose()
+
+
+def test_different_values_give_409_naming_cycles_and_store_nothing(client: TestClient) -> None:
+    client.post("/units/5/readings", json=readings(range(1, 6)))
+    changed = readings(range(4, 9))
+    changed["readings"][0]["s_11"] += 0.01  # cycle 4 differs; cycle 5 is identical
+    r = client.post("/units/5/readings", json=changed)
     assert r.status_code == 409
-    assert "[4, 5]" in r.json()["detail"]
-    again = client.post("/units/4/readings", json=readings(range(6, 7)))
-    assert again.json()["n_total"] == 6  # cycles 6-8 of the rejected batch were not stored
+    detail = r.json()["detail"]
+    assert "different readings" in detail and "[4]" in detail and "5" not in detail.split("[")[1]
+    status = client.get("/units/5").json()
+    assert status["n_readings"] == 5 and status["last_cycle"] == 5  # 6-8 not stored either
+
+
+def test_another_engine_under_the_same_id_is_rejected(client: TestClient) -> None:
+    client.post("/units/6/readings", json=readings(range(1, 11), drift=0.05))
+    other_engine = readings(range(1, 11), drift=0.20)  # same cycles, different values
+    r = client.post("/units/6/readings", json=other_engine)
+    assert r.status_code == 409 and "10 cycle(s)" in r.json()["detail"]
 
 
 def test_same_cycle_for_different_units_is_fine(client: TestClient) -> None:
@@ -116,8 +159,6 @@ def test_invalid_readings_give_422(client: TestClient, url: str, body: dict) -> 
 def test_stored_values_round_trip_exactly(client: TestClient, schema_url: str) -> None:
     sent = readings(range(1, 4))["readings"]
     client.post("/units/8/readings", json={"readings": sent})
-    from predmaint.db import repository
-
     engine = create_engine(schema_url)
     with Session(engine) as session:
         history = repository.get_history(session, 8)
@@ -240,3 +281,28 @@ def test_list_readings_order_limit_and_404(client: TestClient) -> None:
     assert rows[0]["s_2"] == pytest.approx(reading(1, 0.05)["s_2"])
     assert [r["cycle"] for r in client.get("/units/23/readings?limit=3").json()] == [6, 7, 8]
     assert client.get("/units/24/readings").status_code == 404
+
+
+def test_concurrent_identical_insert_is_resolved_as_no_op(schema_url: str) -> None:
+    """Race: rows appear between the "is it stored?" check and the commit.
+
+    Forced deterministically: the first lookup reports nothing stored although the rows exist,
+    so the insert hits the unique constraint. add_readings must then look again and accept the
+    identical rows as already stored, instead of failing.
+    """
+    engine = create_engine(schema_url)
+    batch = readings(range(1, 4))["readings"]
+    with Session(engine) as session:
+        repository.add_readings(session, 30, batch)
+    with Session(engine) as session:
+        real_scalars, calls = session.scalars, {"n": 0}
+
+        def stale_first_lookup(statement, *args, **kwargs):
+            calls["n"] += 1
+            return iter(()) if calls["n"] == 1 else real_scalars(statement, *args, **kwargs)
+
+        session.scalars = stale_first_lookup  # type: ignore[method-assign]
+        result = repository.add_readings(session, 30, batch)
+    engine.dispose()
+    assert (result.stored, result.already_stored) == (0, 3)
+    assert calls["n"] == 2  # looked again after the unique-constraint violation

@@ -12,15 +12,33 @@ from predmaint.data.load import SENSOR_COLUMNS, SETTING_COLUMNS
 from predmaint.simulation import replay
 from predmaint.simulation.replay import ReplayConfig, ReplayError, parse_units, run_replay
 
+VALUE_COLUMNS = [*SETTING_COLUMNS, *SENSOR_COLUMNS]
+
 
 class FakeService:
-    """Mimics the /units API rules: all-or-nothing batches, 409 on duplicates, 404 if unknown."""
+    """Mimics the /units API rules.
+
+    POST is idempotent but strict: a reading identical to a stored one is a no-op, a different
+    one gives 409 naming the cycles, and batches are all or nothing. GET /units/{id} is 404 if
+    the unit is unknown.
+    """
 
     def __init__(self) -> None:
-        self.cycles: dict[int, list[int]] = {}
+        self.readings: dict[int, dict[int, dict]] = {}  # unit -> cycle -> reading
         self.predicted_at: dict[int, list[int]] = {}
         self.log: list[str] = []  # "GET /units/1", "POST 1 [3, 4]", "PREDICT 1@10"
         self.fail: Callable[[httpx.Request], httpx.Response | None] | None = None
+
+    @property
+    def cycles(self) -> dict[int, list[int]]:
+        return {u: sorted(r) for u, r in self.readings.items()}
+
+    def preload(self, data: pd.DataFrame, unit: int, cycles: range, as_unit: int | None = None):
+        """Store rows of ``data`` (as if an earlier run had sent them)."""
+        rows = data[(data["unit"] == unit) & data["cycle"].isin(cycles)]
+        store = self.readings.setdefault(unit if as_unit is None else as_unit, {})
+        for r in rows[["cycle", *VALUE_COLUMNS]].to_dict(orient="records"):
+            store[int(r["cycle"])] = {**r, "cycle": int(r["cycle"])}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         if self.fail is not None:
@@ -29,7 +47,7 @@ class FakeService:
                 return injected
         parts = request.url.path.strip("/").split("/")  # ["units", "1", ...]
         unit = int(parts[1])
-        stored = self.cycles.setdefault(unit, [])
+        stored = self.readings.setdefault(unit, {})
         if request.method == "GET" and len(parts) == 2:
             self.log.append(f"GET /units/{unit}")
             if not stored and not self.predicted_at.get(unit):
@@ -46,13 +64,22 @@ class FakeService:
                 },
             )
         if request.method == "POST":
-            cycles = [r["cycle"] for r in json.loads(request.content)["readings"]]
-            self.log.append(f"POST {unit} {cycles}")
-            clash = sorted(set(cycles) & set(stored))
-            if clash:
-                return httpx.Response(409, json={"detail": f"already has cycles {clash}"})
-            stored.extend(cycles)
-            return httpx.Response(201, json={"n_total": len(stored)})
+            batch = json.loads(request.content)["readings"]
+            self.log.append(f"POST {unit} {[r['cycle'] for r in batch]}")
+            conflicts = [
+                r["cycle"] for r in batch if r["cycle"] in stored and stored[r["cycle"]] != r
+            ]
+            if conflicts:
+                return httpx.Response(
+                    409,
+                    json={"detail": f"unit {unit} already has different readings for {conflicts}"},
+                )
+            new = [r for r in batch if r["cycle"] not in stored]
+            for r in new:
+                stored[r["cycle"]] = r
+            return httpx.Response(
+                201, json={"n_stored": len(new), "n_already_stored": len(batch) - len(new)}
+            )
         if not stored:
             return httpx.Response(404, json={"detail": "no stored readings"})
         last = max(stored)
@@ -64,25 +91,22 @@ class FakeService:
         return httpx.Client(transport=httpx.MockTransport(self.handler), base_url="http://test")
 
 
-def trajectories(lengths: dict[int, int]) -> pd.DataFrame:
-    rng = np.random.default_rng(0)
+def trajectories(lengths: dict[int, int], seed: int = 0) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
     frames = []
     for unit, n in lengths.items():
-        f = pd.DataFrame(rng.normal(size=(n, 24)), columns=[*SETTING_COLUMNS, *SENSOR_COLUMNS])
+        f = pd.DataFrame(rng.normal(size=(n, 24)), columns=VALUE_COLUMNS)
         f.insert(0, "unit", unit)
         f.insert(1, "cycle", np.arange(1, n + 1))
         frames.append(f)
     return pd.concat(frames, ignore_index=True)
 
 
-def run(service: FakeService, lengths: dict[int, int], **config) -> replay.ReplaySummary:
+def run(service: FakeService, lengths: dict[int, int], data: pd.DataFrame | None = None, **config):
     sleeps: list[float] = []
+    data = trajectories(lengths) if data is None else data
     summary = run_replay(
-        trajectories(lengths),
-        sorted(lengths),
-        ReplayConfig(**config),
-        http=service.client(),
-        sleep=sleeps.append,
+        data, sorted(lengths), ReplayConfig(**config), http=service.client(), sleep=sleeps.append
     )
     summary.sleeps = sleeps  # type: ignore[attr-defined]
     return summary
@@ -139,39 +163,45 @@ def test_delay_is_applied_between_requests() -> None:
     assert summary.sleeps == [0.25] * 4  # 3 POSTs + 1 final prediction
 
 
-# --- resume ------------------------------------------------------------------------------------
+# --- resume: stored cycles are verified by re-sending them, not blindly skipped ----------------
 
 
-def test_resume_skips_already_stored_cycles() -> None:
-    service = FakeService()
-    service.cycles[1] = list(range(1, 14))  # an earlier run stored cycles 1-13
+def test_resume_verifies_stored_cycles_then_continues() -> None:
+    data, service = trajectories({1: 25}), FakeService()
+    service.preload(data, 1, range(1, 14))  # an earlier run stored cycles 1-13
     service.predicted_at[1] = [10]
-    summary = run(service, {1: 25}, predict_every=10)
+    summary = run(service, {1: 25}, data, predict_every=10)
     posted = [line for line in service.log if line.startswith("POST")]
-    assert posted[0] == "POST 1 [14]" and len(posted) == 12  # cycles 14-25 only
+    assert posted[0] == f"POST 1 {list(range(1, 14))}"  # one verification request
+    assert posted[1] == "POST 1 [14]" and len(posted) == 1 + 12
     assert service.predicted_at[1] == [10, 20, 25]
-    assert summary.units[0].skipped == 13 and summary.units[0].sent == 12
+    assert summary.units[0].verified == 13 and summary.units[0].sent == 12
 
 
-def test_resume_catches_up_a_missed_checkpoint_prediction() -> None:
-    service = FakeService()
-    service.cycles[1] = list(range(1, 21))  # stopped after storing 20, before predicting
+def test_resume_catches_up_a_missed_checkpoint_prediction_after_verifying() -> None:
+    data, service = trajectories({1: 25}), FakeService()
+    service.preload(data, 1, range(1, 21))  # stopped after storing 20, before predicting
     service.predicted_at[1] = [10]
-    run(service, {1: 25}, predict_every=10)
-    assert service.log[:3] == ["GET /units/1", "PREDICT 1@20", "POST 1 [21]"]
+    run(service, {1: 25}, data, predict_every=10)
+    assert service.log[:4] == [
+        "GET /units/1",
+        f"POST 1 {list(range(1, 21))}",
+        "PREDICT 1@20",
+        "POST 1 [21]",
+    ]
 
 
-def test_completed_unit_sends_nothing() -> None:
-    service = FakeService()
-    service.cycles[1] = list(range(1, 26))
+def test_completed_unit_is_only_verified() -> None:
+    data, service = trajectories({1: 25}), FakeService()
+    service.preload(data, 1, range(1, 26))
     service.predicted_at[1] = [10, 20, 25]
-    summary = run(service, {1: 25}, predict_every=10)
-    assert service.log == ["GET /units/1"]
-    assert summary.units[0].sent == 0 and summary.units[0].skipped == 25
+    summary = run(service, {1: 25}, data, predict_every=10)
+    assert service.log == ["GET /units/1", f"POST 1 {list(range(1, 26))}"]
+    assert summary.units[0].sent == 0 and summary.units[0].verified == 25
 
 
 def test_interrupted_run_resumes_to_the_same_end_state() -> None:
-    service = FakeService()
+    data, service = trajectories({1: 25}), FakeService()
     calls = {"n": 0}
 
     def crash_midway(request: httpx.Request) -> httpx.Response | None:
@@ -182,14 +212,39 @@ def test_interrupted_run_resumes_to_the_same_end_state() -> None:
 
     service.fail = crash_midway
     with pytest.raises(ReplayError):
-        run(service, {1: 25}, predict_every=10)
+        run(service, {1: 25}, data, predict_every=10)
     service.fail = None
-    run(service, {1: 25}, predict_every=10)  # second run picks up where the first stopped
+    run(service, {1: 25}, data, predict_every=10)  # second run verifies, then continues
     assert service.cycles[1] == list(range(1, 26))
     assert service.predicted_at[1][-1] == 25
 
 
-# --- errors and retries ------------------------------------------------------------------------
+# --- mixed history is detected -------------------------------------------------------------------
+
+
+def test_another_engines_history_under_the_same_id_stops_the_replay() -> None:
+    # Unit 1's id already holds the first 13 cycles of a DIFFERENT engine (e.g. a training
+    # engine). Skipping by last_cycle would silently append test cycles 14-25 to it.
+    test_data, other_engine = trajectories({1: 25}, seed=0), trajectories({1: 25}, seed=99)
+    service = FakeService()
+    service.preload(other_engine, 1, range(1, 14))
+    with pytest.raises(ReplayError, match="stored readings do not match test engine 1") as err:
+        run(service, {1: 25}, test_data, predict_every=10)
+    assert err.value.status_code == 409
+    assert "--unit-offset" in str(err.value)
+    assert service.cycles[1] == list(range(1, 14))  # nothing appended
+    assert not any(line.startswith("POST 1 [14") for line in service.log)
+
+
+def test_more_stored_cycles_than_the_engine_has_stops_the_replay() -> None:
+    data, service = trajectories({1: 10}), FakeService()
+    service.preload(trajectories({1: 40}, seed=5), 1, range(1, 41))
+    with pytest.raises(ReplayError, match="readings up to cycle 40, but test engine 1 has only 10"):
+        run(service, {1: 10}, data)
+    assert service.log == ["GET /units/1"]
+
+
+# --- errors and retries --------------------------------------------------------------------------
 
 
 def test_client_error_stops_with_clear_message() -> None:
@@ -221,27 +276,26 @@ def test_connection_errors_are_retried() -> None:
     assert summary.sleeps[:2] == [0.1, 0.2]  # exponential backoff
 
 
-def test_lost_response_after_commit_is_not_resent() -> None:
-    # The service stores cycle 2 but the response never arrives. The retry must notice the
-    # batch is stored (via GET /units/1) instead of re-sending it and failing with 409.
-    service = FakeService()
+def test_retry_after_lost_response_is_a_harmless_no_op() -> None:
+    # The service stores cycle 2 but the response never arrives. The client simply re-sends;
+    # because POSTs are idempotent, the re-send is accepted as "already stored".
+    data, service = trajectories({1: 3}), FakeService()
     lost = {"done": False}
 
     def lose_response(request: httpx.Request) -> httpx.Response | None:
-        if (
-            request.method == "POST"
-            and b'"cycle":2' in request.content.replace(b" ", b"")
-            and not lost["done"]
-        ):
+        body = json.loads(request.content) if request.method == "POST" else None
+        if body and body["readings"][0]["cycle"] == 2 and not lost["done"]:
             lost["done"] = True
-            service.cycles.setdefault(1, []).append(2)  # committed on the server
-            raise httpx.ReadError("connection reset", request=request)
+            service.handler(request)  # committed on the server ...
+            raise httpx.ReadError("connection reset", request=request)  # ... response lost
         return None
 
     service.fail = lose_response
-    run(service, {1: 3}, predict_every=10, backoff=0)
+    summary = run(service, {1: 3}, data, predict_every=10, backoff=0)
     assert service.cycles[1] == [1, 2, 3]
-    assert service.log.count("POST 1 [2]") == 0  # never re-sent
+    assert service.log.count("POST 1 [2]") == 2  # original + identical re-send
+    assert summary.units[0].sent == 2 and summary.units[0].verified == 1
+    assert summary.retries == 1
 
 
 def test_server_errors_are_retried_then_give_up() -> None:
@@ -251,7 +305,7 @@ def test_server_errors_are_retried_then_give_up() -> None:
         run(service, {1: 2}, max_retries=3, backoff=0)
 
 
-# --- CLI pieces --------------------------------------------------------------------------------
+# --- CLI pieces ----------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -294,5 +348,5 @@ def test_main_reads_trajectories_only_never_true_rul(
     )
     assert replay.main(["--subset", "FD001", "--units", "1-2", "--predict-every", "5"]) == 0
     out = capsys.readouterr().out
-    assert "unit 1: sent 12 of 12 cycles" in out and "Done: 2 units, 15 readings sent" in out
+    assert "unit 1: sent 12 new of 12 cycles" in out and "Done: 2 units, 15 readings sent" in out
     assert not hasattr(replay, "load_test_rul")  # not even imported

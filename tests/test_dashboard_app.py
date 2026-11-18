@@ -5,9 +5,11 @@ skipped without it.
 """
 
 import json
+import sys
 from pathlib import Path
 
 import httpx
+import pandas as pd
 import pytest
 
 from predmaint.dashboard import client as client_module
@@ -241,3 +243,41 @@ def test_app_renders_rul_chart_with_band_and_thresholds_plus_four_sensors(app_te
     at.number_input[1].set_value(60.0).run()  # thresholds in the chart follow the sidebar
     _, data = chart_layers_and_data(at.get("vega_lite_chart")[0])
     assert next(d for d in data if "label" in d.columns)["value"].tolist() == [20.0, 60.0]
+
+
+def displayed_table(at) -> pd.DataFrame:
+    """The table as the browser shows it (the Styler's display values, not the raw data)."""
+    import pyarrow as pa
+
+    styler = at.dataframe[0].proto.arrow_data.styler
+    return pa.ipc.open_stream(styler.display_values).read_all().to_pandas()
+
+
+def test_table_shows_rul_lower_upper_with_one_decimal(app_test, monkeypatch) -> None:
+    full_precision = {"rul": 39.330592, "lower": 23.363054, "upper": 55.29813}
+    units = [dict(u) for u in UNITS]
+    units[1] = {
+        **units[1],
+        "latest_prediction": {**units[1]["latest_prediction"], **full_precision},
+    }
+    monkeypatch.setattr(sys.modules[__name__], "UNITS", units)
+    at = app_test.run()
+    shown = displayed_table(at)
+    row = shown.loc[at.dataframe[0].value["unit"] == 3].iloc[0]
+    assert (row["RUL"], row["lower"], row["upper"]) == ("39.3", "23.4", "55.3")
+    assert row["status"] == "▲ Warning" and row["predicted at cycle"] == "126"
+    unpredicted = shown.loc[at.dataframe[0].value["unit"] == 9].iloc[0]
+    assert (unpredicted["RUL"], unpredicted["lower"], unpredicted["upper"]) == ("–", "–", "–")
+
+
+def test_rul_tooltips_use_one_decimal(app_test) -> None:
+    spec = json.loads(app_test.run().get("vega_lite_chart")[0].proto.spec)
+    tooltips = [
+        layer["encoding"]["tooltip"]
+        for layer in spec["layer"]
+        if "tooltip" in layer.get("encoding", {})
+    ]
+    assert len(tooltips) == 2  # the shaded band and the points
+    for tooltip in tooltips:
+        formats = {t["field"]: t.get("format") for t in tooltip}
+        assert formats == {"cycle": None, "rul": ".1f", "lower": ".1f", "upper": ".1f"}

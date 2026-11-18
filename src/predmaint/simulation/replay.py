@@ -10,15 +10,17 @@ after every ``--predict-every`` cycles and at the unit's last cycle.
 **No label leakage.** The simulator reads only the test *trajectories* (``load_test``). It never
 reads ``RUL_FD00x.txt``, so the service cannot see a single true label through it.
 
-**Resumable.** Readings are always sent in cycle order and stored all or nothing, so a unit's
-stored cycles are always a complete prefix 1..k of its trajectory. On (re)start, the simulator
-asks ``GET /units/{id}`` for k and continues at k + 1. If the last run stopped between storing a
-checkpoint cycle and asking for its prediction, that prediction is requested first.
+**Resumable and verified.** The service accepts a re-sent reading that is identical to a stored
+one as a no-op, and rejects a different one with 409. So on (re)start the simulator does not
+blindly skip stored cycles: it re-sends them in large batches, which *verifies* that what is
+stored under this unit id really is this engine. It then continues with the new cycles. A mixed
+history, e.g. another engine's readings under the same id, stops the run with a clear error.
+If the last run stopped between storing a checkpoint cycle and predicting, that prediction is
+requested after verification.
 
-**Retries.** Connection errors and 5xx responses are retried with exponential backoff. Before a
-POST is retried, the unit's status is checked again: if the batch was in fact stored (the
-response was lost on the way back), it counts as sent instead of being re-sent and rejected
-with 409. Any other 4xx stops the run with a clear error.
+**Retries.** Connection errors and 5xx responses are retried with exponential backoff. Because
+POSTs are idempotent, a retry simply re-sends the same batch: if the first attempt was stored
+and only the response was lost, the re-send is a harmless no-op. Any other 4xx stops the run.
 """
 
 import argparse
@@ -32,12 +34,20 @@ import pandas as pd
 
 from predmaint.data.load import SENSOR_COLUMNS, SETTING_COLUMNS, load_test
 from predmaint.features.selection import SUBSETS_WITH_ADR
+from predmaint.serving.schemas import MAX_READINGS
 
 READING_COLUMNS = ["cycle", *SETTING_COLUMNS, *SENSOR_COLUMNS]
 
 
 class ReplayError(RuntimeError):
     """The replay cannot continue (client error from the service, or retries exhausted)."""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+VERIFY_BATCH = MAX_READINGS  # re-send already-stored cycles in as few requests as possible
 
 
 @dataclass
@@ -63,8 +73,8 @@ class ReplayConfig:
 class UnitResult:
     unit_id: int
     n_cycles: int
-    sent: int = 0
-    skipped: int = 0
+    sent: int = 0  # new readings stored by this run
+    verified: int = 0  # readings re-sent and confirmed identical to what was already stored
     requests: int = 0
     predictions: list[dict] = field(default_factory=list)
 
@@ -103,7 +113,8 @@ class ServiceClient:
                     return response
                 if response.status_code < 500:
                     raise ReplayError(
-                        f"{method} {url} failed with {response.status_code}: {_detail(response)}"
+                        f"{method} {url} failed with {response.status_code}: {_detail(response)}",
+                        status_code=response.status_code,
                     )
                 problem = f"HTTP {response.status_code}: {_detail(response)}"
             if attempt == self.config.max_retries:
@@ -111,21 +122,10 @@ class ServiceClient:
             self.retries += 1
             wait = self.config.backoff * 2**attempt
             print(f"  retry {attempt + 1}/{self.config.max_retries} in {wait:.1f}s ({problem})")
-            self.sleep(wait)
-            if method == "POST" and self._already_stored(url, kwargs["json"]):
-                return httpx.Response(201, json={"resynced": True})
+            self.sleep(wait)  # then simply re-send: POSTs are idempotent
         raise ReplayError(
             f"{method} {url} failed after {self.config.max_retries} retries: {problem}"
         )
-
-    def _already_stored(self, url: str, body: dict) -> bool:
-        """After a failed POST: did the batch actually get stored before the response was lost?"""
-        unit_id = int(url.split("/")[2])
-        try:
-            last = self.summary(unit_id)["last_cycle"]
-        except (ReplayError, httpx.TransportError):
-            return False
-        return last is not None and last >= body["readings"][-1]["cycle"]
 
     def summary(self, unit_id: int) -> dict:
         r = self._request("GET", f"/units/{unit_id}", ok_404=True)
@@ -133,8 +133,10 @@ class ServiceClient:
             return {"last_cycle": None, "last_prediction_cycle": None}
         return r.json()
 
-    def post_readings(self, unit_id: int, readings: list[dict]) -> None:
-        self._request("POST", f"/units/{unit_id}/readings", json={"readings": readings})
+    def post_readings(self, unit_id: int, readings: list[dict]) -> dict:
+        return self._request(
+            "POST", f"/units/{unit_id}/readings", json={"readings": readings}
+        ).json()
 
     def predict(self, unit_id: int) -> dict:
         return self._request("GET", f"/units/{unit_id}/prediction").json()
@@ -157,7 +159,7 @@ def _readings(df: pd.DataFrame) -> list[dict]:
 def replay_unit(
     client: ServiceClient, test_unit: int, trajectory: pd.DataFrame, config: ReplayConfig
 ) -> UnitResult:
-    """Send one unit's trajectory (resuming after already-stored cycles) and request predictions."""
+    """Send one unit's trajectory and request predictions; verify and resume after stored cycles."""
     unit_id = test_unit + config.unit_offset
     trajectory = trajectory.sort_values("cycle")
     last_cycle = int(trajectory["cycle"].iloc[-1])
@@ -173,20 +175,48 @@ def replay_unit(
     status = client.summary(unit_id)
     result.requests += 1
     stored = status["last_cycle"] or 0
-    pending = trajectory[trajectory["cycle"] > stored]
-    result.skipped = len(trajectory) - len(pending)
+    if stored > last_cycle:
+        raise ReplayError(
+            f"unit {unit_id} already has readings up to cycle {stored}, but test engine "
+            f"{test_unit} has only {last_cycle} cycles: the stored history belongs to another "
+            "engine. Use --unit-offset or a fresh database."
+        )
 
-    # A run that stopped after storing a checkpoint but before predicting: catch up first.
+    def post(batch: list[dict]) -> dict:
+        try:
+            return client.post_readings(unit_id, batch)
+        except ReplayError as exc:
+            if exc.status_code == 409:
+                raise ReplayError(
+                    f"unit {unit_id}: the stored readings do not match test engine {test_unit} "
+                    f"({exc}). The unit id may hold another engine's data; use --unit-offset "
+                    "or a fresh database.",
+                    status_code=409,
+                ) from exc
+            raise
+
+    rows = _readings(trajectory)
+    # 1. Verify what is already stored by re-sending it (identical readings are no-ops).
+    already = [r for r in rows if r["cycle"] <= stored]
+    for start in range(0, len(already), VERIFY_BATCH):
+        answer = post(already[start : start + VERIFY_BATCH])
+        result.verified += answer.get("n_already_stored", 0)
+        result.sent += answer.get("n_stored", 0)  # gaps in the stored prefix get filled
+        result.requests += 1
+
+    # 2. A run that stopped after storing a checkpoint but before predicting: catch up.
     if stored and is_checkpoint(stored) and (status["last_prediction_cycle"] or 0) < stored:
         result.predictions.append(client.predict(unit_id))
         result.requests += 1
 
-    rows = _readings(pending)
-    for start in range(0, len(rows), config.batch_size):
-        batch = rows[start : start + config.batch_size]
+    # 3. New cycles, at the configured batch size and pace.
+    pending = [r for r in rows if r["cycle"] > stored]
+    for start in range(0, len(pending), config.batch_size):
+        batch = pending[start : start + config.batch_size]
         wait()
-        client.post_readings(unit_id, batch)
-        result.sent += len(batch)
+        answer = post(batch)
+        result.sent += answer.get("n_stored", len(batch))
+        result.verified += answer.get("n_already_stored", 0)
         result.requests += 1
         if any(is_checkpoint(r["cycle"]) for r in batch):
             wait()
@@ -242,8 +272,8 @@ def run_replay(
                 else "no new prediction"
             )
             print(
-                f"unit {r.unit_id}: sent {r.sent} of {r.n_cycles} cycles (skipped {r.skipped} "
-                f"already stored), {len(r.predictions)} predictions, {latest}"
+                f"unit {r.unit_id}: sent {r.sent} new of {r.n_cycles} cycles, verified "
+                f"{r.verified} already stored, {len(r.predictions)} predictions, {latest}"
             )
     finally:
         if own_http:

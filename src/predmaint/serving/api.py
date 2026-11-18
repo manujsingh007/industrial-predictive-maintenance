@@ -196,17 +196,31 @@ def create_app(
         "/units/{unit_id}/readings",
         response_model=ReadingsStored,
         status_code=status.HTTP_201_CREATED,
-        responses={409: {"description": "Cycle already stored"}, 503: {"description": "No DB"}},
+        responses={
+            409: {"description": "Cycle stored with different values"},
+            503: {"description": "No DB"},
+        },
         tags=["units"],
     )
     def store_readings(unit_id: UnitId, body: ReadingsBatch, repo: RepoDep) -> ReadingsStored:
-        """Store readings for a unit, all or nothing. 409 if any cycle is already stored."""
+        """Store readings for a unit; idempotent and all or nothing.
+
+        Re-sending a reading identical to a stored one is a no-op (counted in
+        ``n_already_stored``), so clients can retry safely. A cycle already stored with
+        different values gives 409 naming the cycles, and nothing from the batch is stored.
+        """
         try:
-            n = repo.add_readings(unit_id, [r.model_dump() for r in body.readings])
-        except repository.DuplicateCyclesError as exc:
+            result = repo.add_readings(unit_id, [r.model_dump() for r in body.readings])
+        except repository.ConflictingReadingsError as exc:
             raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         total, last_cycle = repo.count_readings(unit_id)
-        return ReadingsStored(unit_id=unit_id, n_stored=n, n_total=total, last_cycle=last_cycle)
+        return ReadingsStored(
+            unit_id=unit_id,
+            n_stored=result.stored,
+            n_already_stored=result.already_stored,
+            n_total=total,
+            last_cycle=last_cycle,
+        )
 
     @app.get(
         "/units/{unit_id}",

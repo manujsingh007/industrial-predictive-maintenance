@@ -378,3 +378,29 @@ def test_list_readings_unknown_unit_and_bad_limit(repo_client) -> None:
     client, _ = repo_client
     assert client.get("/units/77/readings").status_code == 404
     assert client.get("/units/4/readings?limit=0").status_code == 422
+
+
+def test_store_readings_reports_already_stored_and_maps_conflicts_to_409(repo_client) -> None:
+    from predmaint.db.repository import AddResult, ConflictingReadingsError
+
+    client, repo = repo_client
+    repo.add_readings = lambda unit_id, rows: AddResult(stored=1, already_stored=2)
+    repo.count_readings = lambda unit_id: (3, 3)
+    body = {"readings": [reading(c) for c in (1, 2, 3)]}
+    r = client.post("/units/8/readings", json=body)
+    assert r.status_code == 201
+    assert r.json() == {
+        "unit_id": 8,
+        "n_stored": 1,
+        "n_already_stored": 2,
+        "n_total": 3,
+        "last_cycle": 3,
+    }
+
+    def conflict(unit_id, rows):
+        raise ConflictingReadingsError(unit_id, [2, 3])
+
+    repo.add_readings = conflict
+    r = client.post("/units/8/readings", json=body)
+    assert r.status_code == 409
+    assert "different readings for 2 cycle(s): [2, 3]" in r.json()["detail"]

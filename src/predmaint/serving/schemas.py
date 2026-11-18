@@ -108,6 +108,9 @@ class ReadingsStored(BaseModel):
 
     unit_id: int
     n_stored: int = Field(description="Readings stored by this request")
+    n_already_stored: int = Field(
+        description="Readings identical to ones already stored (accepted as a no-op)"
+    )
     n_total: int = Field(description="Readings now stored for this unit")
     last_cycle: int
 
