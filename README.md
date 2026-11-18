@@ -48,12 +48,23 @@ simulated C-MAPSS dataset ([dataset documentation](docs/dataset.md)).
 - [x] **Milestone 4: error analysis**
   - Late vs early errors, error vs history length, worst engines and the effect of the RUL cap
   - [Summary](docs/error_analysis.md) and [notebook](notebooks/02_error_analysis_fd001.ipynb)
+- [x] **Milestone 5: serving**
+  - Model packaged and registered in MLflow as `rul-lgbm-fd001` with a `champion` alias
+  - FastAPI service: `/health`, `/predict` (stateless), `/units/{id}/readings`,
+    `/units/{id}/prediction`, `/units/{id}/predictions`
+  - PostgreSQL storage with Alembic migrations and a UNIQUE(unit, cycle) constraint
+  - Replay simulator that streams test engines into the service (resumable)
+  - Integration tests against PostgreSQL, also run in CI
+  - **No training/serving skew:** for test engine 3, the live service reproduces the final-test
+    prediction exactly (RUL 39.33 at cycle 126, interval 23.36–55.30)
 
-**Next: Milestone 5**
+**Next: Milestone 6**
 
-- [ ] Serving: FastAPI service with PostgreSQL storage.
-- [ ] Dashboard.
-- [ ] Docker packaging.
+- [ ] Streamlit dashboard:
+  - a fleet view ranked by risk;
+  - a per-engine drill-down with prediction intervals;
+  - alerts.
+- [ ] Drift monitoring.
 
 Later: failure prediction and anomaly detection.
 
