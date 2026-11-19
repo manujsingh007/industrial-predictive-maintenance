@@ -64,7 +64,7 @@ simulated C-MAPSS dataset ([dataset documentation](docs/dataset.md)).
   - a fleet view ranked by risk;
   - a per-engine drill-down with prediction intervals;
   - alerts.
-- [ ] Drift monitoring.
+- [x] Drift monitoring ([ADR 0004](docs/adr/0004-drift-monitoring.md)).
 
 Later: failure prediction and anomaly detection.
 
@@ -152,8 +152,11 @@ uv run --group dashboard streamlit run src/predmaint/dashboard/app.py
 
 - **The replay** sends each engine's readings in cycle order and asks for a prediction every 10
   cycles and at the last one. Add `--delay 0.2` to watch it at a "live" pace.
-- **Resuming:** if the replay is interrupted, run the same command again. Already-stored cycles
-  are skipped.
+- **Resuming:** if the replay is interrupted, run the same command again.
+  - Already-stored cycles are re-sent once as a check. Identical readings are accepted as a
+    no-op, so retries are always safe.
+  - If the stored readings differ, for example because another engine's data is under the same
+    unit id, the replay stops with a clear error instead of mixing the two histories.
 - **No label leakage:** the replay never reads the true-RUL file, so no labels reach the service.
 - **Results:** `GET /units/{id}/predictions` returns a unit's prediction history.
 - **Dashboard:** it reads only from the API. The default is http://127.0.0.1:8000; set
@@ -167,3 +170,23 @@ uv run --group dashboard streamlit run src/predmaint/dashboard/app.py
 
 On macOS, if `docker` is not found although Docker Desktop is running, add its tools to your
 PATH: `export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"`.
+
+## Monitoring
+
+`GET /monitoring/drift?last_n_cycles=30` (also shown in the dashboard) reports the Population
+Stability Index for the 3 operating settings and 14 kept sensors. It compares each unit's last 30
+readings, pooled across the fleet, with the training data's profile stored alongside the model.
+Thresholds: stable < 0.1 ≤ moderate < 0.25 ≤ significant.
+
+What it can and cannot detect:
+
+- **Fleet-wide shifts:** detected. `s_11` +0.5 on all 100 test units gives PSI 4.58.
+- **A fault on a few units:** not detected. The same offset on 10 units gives 0.050, "stable".
+- **Engine degradation** also shifts sensor distributions, so sensor drift needs care. Drift in
+  the operating settings is the clearer signal.
+
+See [ADR 0004](docs/adr/0004-drift-monitoring.md) for the validation and future work.
+
+To try it, replay with an injected fault into a fresh database or new unit ids, e.g.
+`--inject-drift s_11:0.5 --unit-offset 1000`. Units already stored with their real readings
+reject altered values with 409, by design.
