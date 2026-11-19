@@ -350,3 +350,73 @@ def test_main_reads_trajectories_only_never_true_rul(
     out = capsys.readouterr().out
     assert "unit 1: sent 12 new of 12 cycles" in out and "Done: 2 units, 15 readings sent" in out
     assert not hasattr(replay, "load_test_rul")  # not even imported
+
+
+# --- drift injection -----------------------------------------------------------------------------
+
+
+def test_inject_drift_only_changes_selected_units_and_column() -> None:
+    from predmaint.simulation.replay import inject_drift
+
+    data = trajectories({1: 5, 2: 5, 3: 5})
+    out = inject_drift(data, "s_11", 0.5, [2, 3])
+    changed = out["unit"].isin([2, 3])
+    np.testing.assert_allclose(out.loc[changed, "s_11"], data.loc[changed, "s_11"] + 0.5)
+    pd.testing.assert_series_equal(out.loc[~changed, "s_11"], data.loc[~changed, "s_11"])
+    other = [c for c in data.columns if c != "s_11"]
+    pd.testing.assert_frame_equal(out[other], data[other])  # every other column untouched
+    assert data.loc[changed, "s_11"].equals(trajectories({1: 5, 2: 5, 3: 5}).loc[changed, "s_11"])
+
+
+@pytest.mark.parametrize("spec", ["s_11", "s_99:1", "cycle:1", "s_11:abc", ":1"])
+def test_parse_drift_rejects_bad_specs(spec: str) -> None:
+    from predmaint.simulation.replay import parse_drift
+
+    with pytest.raises(ValueError):
+        parse_drift(spec)
+
+
+def test_parse_drift() -> None:
+    from predmaint.simulation.replay import parse_drift
+
+    assert parse_drift("s_11:0.5") == ("s_11", 0.5)
+    assert parse_drift("setting_1:-0.002") == ("setting_1", -0.002)
+
+
+def test_main_injects_drift_into_sent_readings_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = trajectories({1: 3, 2: 3, 3: 3})
+    monkeypatch.setattr(replay, "load_test", lambda subset: data.copy())
+    service = FakeService()
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        replay.httpx,
+        "Client",
+        lambda **kw: real_client(
+            transport=httpx.MockTransport(service.handler), base_url="http://t"
+        ),
+    )
+    args = [
+        "--subset",
+        "FD001",
+        "--units",
+        "1-3",
+        "--inject-drift",
+        "s_4:2.5",
+        "--drift-units",
+        "2-3",
+    ]
+    assert replay.main(args) == 0
+    assert "DRIFT INJECTED: s_4 +2.5 on 2 unit(s) 2-3" in capsys.readouterr().out
+    for unit in (1, 2, 3):
+        original = data[data["unit"] == unit].set_index("cycle")
+        for cycle, sent in service.readings[unit].items():
+            expected = original.at[cycle, "s_4"] + (2.5 if unit in (2, 3) else 0.0)
+            assert sent["s_4"] == pytest.approx(expected)
+            assert sent["s_11"] == pytest.approx(original.at[cycle, "s_11"])
+
+
+def test_drift_units_without_inject_drift_is_an_error() -> None:
+    with pytest.raises(SystemExit):
+        replay.main(["--subset", "FD001", "--drift-units", "1-3"])

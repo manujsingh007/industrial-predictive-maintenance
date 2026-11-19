@@ -27,9 +27,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from predmaint.db import repository
 from predmaint.db.settings import get_database_url
+from predmaint.monitoring.drift import drift_report
 from predmaint.serving.predictor import InvalidHistoryError
 from predmaint.serving.registry import LoadedModel
 from predmaint.serving.schemas import (
+    ColumnDrift,
+    DriftReport,
     HealthResponse,
     PredictRequest,
     PredictResponse,
@@ -46,6 +49,11 @@ logger = logging.getLogger(__name__)
 
 ModelLoader = Callable[[], LoadedModel]
 UnitId = Annotated[int, Path(ge=1, description="Engine identifier")]
+DRIFT_CAVEAT = (
+    "The reference covers whole engine lives. Engines late in life have sensor values shifted by "
+    "degradation, so sensor PSI can be high without any fault; drift in the operating settings "
+    "is the clearer signal. A fault on a few units barely moves fleet-pooled PSI."
+)
 
 
 def load_from_registry() -> LoadedModel:
@@ -307,6 +315,40 @@ def create_app(
                 status.HTTP_404_NOT_FOUND, detail=f"unit {unit_id} has no stored readings"
             )
         return [StoredReading.model_validate(r) for r in rows]
+
+    @app.get(
+        "/monitoring/drift",
+        response_model=DriftReport,
+        responses={404: {"description": "No readings"}, 503: {"description": "No model/DB"}},
+        tags=["monitoring"],
+    )
+    def drift(
+        model: ModelDep,
+        repo: RepoDep,
+        last_n_cycles: Annotated[
+            int, Query(ge=1, le=1000, description="Most recent readings per unit")
+        ] = 30,
+    ) -> DriftReport:
+        """PSI per monitored column: each unit's most recent N readings, pooled across the
+        fleet, against the training-data profile stored with the loaded model."""
+        if model.reference_profile is None:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"model version {model.version} has no drift reference profile; "
+                "rebuild it with: uv run python -m predmaint.training.build_model --subset FD001",
+            )
+        current = repo.recent_readings(last_n_cycles)
+        if current.empty:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="no stored readings yet")
+        return DriftReport(
+            last_n_cycles=last_n_cycles,
+            n_units=int(current["unit"].nunique()),
+            n_readings=len(current),
+            model_version=model.version,
+            reference_rows=model.reference_profile.n_rows,
+            caveat=DRIFT_CAVEAT,
+            columns=[ColumnDrift(**c) for c in drift_report(model.reference_profile, current)],
+        )
 
     return app
 

@@ -5,13 +5,18 @@ import pytest
 
 from predmaint.dashboard.logic import (
     DEFAULT_THRESHOLDS,
+    DRIFT_COLOURS,
+    DRIFT_LABELS,
     FLEET_COLUMNS,
     STATUS_COLOURS,
     STATUS_LABELS,
     STATUSES,
     RiskThresholds,
+    bin_labels,
+    drift_table,
     fleet_kpis,
     fleet_table,
+    histogram_frame,
     prediction_history,
     rank_units,
     risk_status,
@@ -185,3 +190,52 @@ def test_prediction_history_sorted_by_cycle_newest_wins_per_cycle() -> None:
 
 def test_prediction_history_empty() -> None:
     assert prediction_history([]).empty
+
+
+# --- data drift --------------------------------------------------------------------------------
+
+
+def column(name: str, value: float, status: str) -> dict:
+    return {
+        "column": name,
+        "psi": value,
+        "status": status,
+        "n_current": 300,
+        "bin_edges": [1.0, 2.0],
+        "reference_shares": [0.3, 0.4, 0.3],
+        "current_shares": [0.1, 0.4, 0.5],
+    }
+
+
+def test_drift_table_sorted_by_psi_with_kind() -> None:
+    report = {
+        "columns": [
+            column("s_4", 0.12, "moderate"),
+            column("setting_1", 0.01, "stable"),
+            column("s_11", 0.9, "significant"),
+        ]
+    }
+    table = drift_table(report)
+    assert table["column"].tolist() == ["s_11", "s_4", "setting_1"]
+    assert table["kind"].tolist() == ["sensor", "sensor", "setting"]
+    assert table["status"].tolist() == ["significant", "moderate", "stable"]
+    assert drift_table({"columns": []}).empty
+
+
+def test_drift_statuses_have_labels_and_colours() -> None:
+    assert set(DRIFT_LABELS) == set(DRIFT_COLOURS) == {"stable", "moderate", "significant"}
+
+
+def test_bin_labels() -> None:
+    assert bin_labels([47.25, 47.5]) == ["< 47.25", "47.25 – 47.5", "≥ 47.5"]
+    assert bin_labels([100.0]) == ["< 100", "≥ 100"]
+    assert bin_labels([]) == ["all values"]
+
+
+def test_histogram_frame_pairs_reference_and_current_per_bin() -> None:
+    frame = histogram_frame(column("s_11", 0.9, "significant"))
+    assert len(frame) == 6
+    ref = frame[frame["source"] == "reference"]["share"].tolist()
+    cur = frame[frame["source"] == "current"]["share"].tolist()
+    assert ref == [0.3, 0.4, 0.3] and cur == [0.1, 0.4, 0.5]
+    assert frame["bin"].tolist()[:3] == ["< 1", "1 – 2", "≥ 2"]

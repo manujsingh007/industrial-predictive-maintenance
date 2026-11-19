@@ -276,3 +276,36 @@ def test_pyfunc_interface_predicts_several_engines(predictor, fleet, tmp_path: P
     out = pyfunc.predict(test)
     assert len(out) == test["unit"].nunique()
     assert {"rul", "lower", "upper", "n_cycles_seen"} <= set(out.columns)
+
+
+def test_reference_profile_travels_with_the_model_version(predictor, fleet, tmp_path: Path) -> None:
+    from predmaint.monitoring.drift import build_reference_profile
+    from predmaint.serving.registry import load_champion_info
+
+    uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
+    artifacts = (tmp_path / "mlruns").as_uri()
+    train, _ = fleet
+    profile = build_reference_profile(train, ["setting_1", *KEPT_SENSORS])
+
+    v1 = register_champion(predictor, tracking_uri=uri, artifact_location=artifacts)
+    assert load_champion_info(tracking_uri=uri).reference_profile is None  # older-style model
+
+    v2 = register_champion(
+        predictor, reference_profile=profile, tracking_uri=uri, artifact_location=artifacts
+    )
+    assert int(v2) == int(v1) + 1  # rebuilding creates a new version ...
+    loaded = load_champion_info(tracking_uri=uri)
+    assert loaded.version == v2  # ... and the champion alias moves to it
+    assert loaded.reference_profile == profile
+
+    # The profile is a readable JSON file inside the registered model version itself.
+    from predmaint.monitoring.drift import ReferenceProfile
+    from predmaint.serving.registry import _tracking_uri
+
+    with _tracking_uri(uri):
+        local = mlflow.artifacts.download_artifacts(
+            f"models:/rul-lgbm-fd001/{v2}", dst_path=str(tmp_path / "download")
+        )
+    files = list(Path(local).rglob("reference_profile.json"))
+    assert len(files) == 1
+    assert ReferenceProfile.from_json(files[0].read_text()) == profile

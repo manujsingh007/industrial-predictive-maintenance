@@ -5,13 +5,16 @@ Run with: ``uv run python -m predmaint.training.build_model --subset FD001``
 Training and calibration call :func:`predmaint.training.final_eval.train_frozen`, the exact code
 used for the official test evaluation, so the served model is the evaluated model. No test data
 is read. The predictor is registered in MLflow as ``rul-lgbm-fd001`` with the alias
-``champion`` (see :mod:`predmaint.serving.registry` for the format choice).
+``champion`` (see :mod:`predmaint.serving.registry` for the format choice), together
+with the drift reference profile of the training readings. Rebuilding registers a new version
+and moves the alias to it.
 """
 
 import argparse
 
 from predmaint.features.selection import DEFAULT_RUL_CAP, KEPT_SENSORS, SUBSETS_WITH_ADR
 from predmaint.models.conformal import MONDRIAN_EDGES, mondrian_bin_labels
+from predmaint.monitoring.drift import build_reference_profile
 from predmaint.serving.predictor import RULPredictor, make_predictor
 from predmaint.training import final_eval
 from predmaint.training.run_cv import DEFAULT_WINDOWS
@@ -58,8 +61,15 @@ def main(argv: list[str] | None = None) -> int:
     from predmaint.serving.registry import CHAMPION_ALIAS, MODEL_NAME, register_champion
 
     predictor, params, metrics = build_predictor(args.subset)
-    version = register_champion(predictor, params=params, metrics=metrics)
+    profile = build_reference_profile(final_eval.load_train(args.subset))
+    version = register_champion(
+        predictor, reference_profile=profile, params=params, metrics=metrics
+    )
     print(f"Registered {MODEL_NAME} version {version} with alias '{CHAMPION_ALIAS}'.")
+    print(
+        f"Drift reference profile: {len(profile.columns)} columns from {profile.n_rows} "
+        "training readings (stored with the model)."
+    )
     print(
         "q per predicted-RUL bin:",
         dict(zip(params["mondrian_bins"].split(","), predictor.q_per_bin, strict=True)),

@@ -55,5 +55,8 @@ class ApiClient:
     def readings(self, unit_id: int, limit: int | None = None) -> list[dict]:
         return self._get(f"/units/{unit_id}/readings", limit=limit)
 
+    def drift(self, last_n_cycles: int = 30) -> dict:
+        return self._get("/monitoring/drift", last_n_cycles=last_n_cycles)
+
     def close(self) -> None:
         self.http.close()

@@ -211,6 +211,24 @@ def get_readings(
     return list(reversed(newest))
 
 
+def recent_readings(session: Session, last_n: int) -> pd.DataFrame:
+    """Each unit's ``last_n`` most recent readings (by cycle), pooled into one DataFrame.
+
+    Columns: unit, cycle, settings and sensors. Empty if nothing is stored.
+    """
+    rank = (
+        func.row_number()
+        .over(partition_by=SensorReadingRow.unit_id, order_by=SensorReadingRow.cycle.desc())
+        .label("rank")
+    )
+    ranked = select(SensorReadingRow, rank).subquery()
+    columns = ["unit_id", "cycle", *READING_VALUE_COLUMNS]
+    rows = session.execute(
+        select(*(ranked.c[c] for c in columns)).where(ranked.c.rank <= last_n)
+    ).all()
+    return pd.DataFrame(rows, columns=columns).rename(columns={"unit_id": "unit"})
+
+
 class Repository:
     """The API's view of the database. A FastAPI dependency, so unit tests can use a fake."""
 
@@ -243,3 +261,6 @@ class Repository:
 
     def get_readings(self, unit_id: int, limit: int | None = None) -> list[SensorReadingRow]:
         return get_readings(self.session, unit_id, limit)
+
+    def recent_readings(self, last_n: int) -> pd.DataFrame:
+        return recent_readings(self.session, last_n)

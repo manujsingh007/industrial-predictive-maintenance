@@ -225,6 +225,41 @@ def replay_unit(
     return result
 
 
+def parse_drift(spec: str) -> tuple[str, float]:
+    """'s_11:0.5' -> ("s_11", 0.5); the column must be a setting or sensor."""
+    column, sep, offset = spec.partition(":")
+    column = column.strip()
+    if not sep or column not in READING_COLUMNS or column == "cycle":
+        raise ValueError(f"--inject-drift must be COLUMN:OFFSET for a setting or sensor: {spec!r}")
+    try:
+        return column, float(offset)
+    except ValueError:
+        raise ValueError(f"invalid drift offset in {spec!r}") from None
+
+
+def inject_drift(
+    trajectories: pd.DataFrame, column: str, offset: float, units: list[int]
+) -> pd.DataFrame:
+    """Return a copy with ``offset`` added to ``column`` for the given units only.
+
+    Simulates a sensor calibration fault (a constant bias) on part of the fleet.
+    """
+    if column not in trajectories.columns or column in ("unit", "cycle"):
+        raise ValueError(f"cannot inject drift into column {column!r}")
+    out = trajectories.copy()
+    rows = out["unit"].isin(units)
+    out.loc[rows, column] = out.loc[rows, column] + offset
+    return out
+
+
+def _format_units(units: list[int]) -> str:
+    if not units:
+        return "(none)"
+    if units == list(range(units[0], units[-1] + 1)):
+        return f"{units[0]}-{units[-1]}"
+    return str(units)
+
+
 def parse_units(spec: str) -> list[int]:
     """'1-10' -> 1..10; '1,4,7-9' -> 1, 4, 7, 8, 9 (sorted, unique)."""
     units: set[int] = set()
@@ -294,6 +329,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--unit-offset", type=int, default=0, help="service id = test unit + offset"
     )
+    parser.add_argument(
+        "--inject-drift",
+        metavar="COLUMN:OFFSET",
+        help="simulate a calibration fault, e.g. s_11:0.5 adds 0.5 to s_11 before sending",
+    )
+    parser.add_argument(
+        "--drift-units", metavar="RANGE", help="units with injected drift (default: all replayed)"
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -306,10 +349,23 @@ def main(argv: list[str] | None = None) -> int:
             unit_offset=args.unit_offset,
         )
         units = parse_units(args.units)
+        if args.drift_units and not args.inject_drift:
+            raise ValueError("--drift-units needs --inject-drift")
+        drift = parse_drift(args.inject_drift) if args.inject_drift else None
+        drift_units = parse_units(args.drift_units) if args.drift_units else units
     except ValueError as exc:
         parser.error(str(exc))
 
     trajectories = load_test(args.subset)  # trajectories only: true RUL is never read
+    if drift:
+        column, offset = drift
+        affected = sorted(set(drift_units) & set(units))
+        trajectories = inject_drift(trajectories, column, offset, affected)
+        print(
+            f"!!! DRIFT INJECTED: {column} {offset:+g} on {len(affected)} unit(s) "
+            f"{_format_units(affected)} (simulated sensor calibration fault). "
+            "These readings are NOT the real test data."
+        )
     print(f"Replaying {len(units)} {args.subset} test units to {config.base_url} ...")
     try:
         summary = run_replay(trajectories, units, config)

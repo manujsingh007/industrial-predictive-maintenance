@@ -58,6 +58,32 @@ UNITS = [
 ]
 
 
+DRIFT: dict | None = {
+    "last_n_cycles": 30,
+    "n_units": 4,
+    "n_readings": 120,
+    "model_version": "2",
+    "reference_rows": 20631,
+    "caveat": "Engines late in life shift sensors by degradation.",
+    "columns": [
+        {
+            "column": c,
+            "psi": v,
+            "status": st,
+            "n_current": 120,
+            "bin_edges": [47.2, 47.5],
+            "reference_shares": [0.3, 0.4, 0.3],
+            "current_shares": sh,
+        }
+        for c, v, st, sh in [
+            ("setting_1", 0.004, "stable", [0.3, 0.4, 0.3]),
+            ("s_11", 0.61, "significant", [0.05, 0.25, 0.7]),
+            ("s_4", 0.14, "moderate", [0.2, 0.4, 0.4]),
+        ]
+    ],
+}
+
+
 def predictions(unit_id: int) -> list[dict]:
     return [
         {
@@ -104,6 +130,10 @@ def fake_api(request: httpx.Request) -> httpx.Response:
         )
     if path == "/units":
         return httpx.Response(200, json=UNITS)
+    if path == "/monitoring/drift":
+        if DRIFT is None:
+            return httpx.Response(503, json={"detail": "model version 1 has no drift profile"})
+        return httpx.Response(200, json=DRIFT)
     parts = path.strip("/").split("/")
     unit_id = int(parts[1])
     if parts[2] == "predictions":
@@ -199,7 +229,7 @@ def test_app_drill_down_and_no_true_rul(app_test) -> None:
 
 def test_app_thresholds_change_statuses(app_test) -> None:
     at = app_test.run()
-    at.number_input[0].set_value(30.0).run()  # critical < 30: unit 3 (lower 23.4) too
+    at.number_input(key="critical").set_value(30.0).run()  # critical < 30: unit 3 (lower 23.4) too
     assert {m.label: m.value for m in at.metric}["● Critical"] == "2"
 
 
@@ -232,7 +262,7 @@ def chart_layers_and_data(chart) -> tuple[list[str], list]:
 def test_app_renders_rul_chart_with_band_and_thresholds_plus_four_sensors(app_test) -> None:
     at = app_test.run()
     charts = at.get("vega_lite_chart")
-    assert len(charts) == 5  # 1 RUL chart + 4 key sensors
+    assert len(charts) == 6  # 1 RUL chart + 4 key sensors + the drift histogram
     marks, data = chart_layers_and_data(charts[0])
     assert marks == ["area", "line", "point", "rule", "text"]  # band, RUL, points, thresholds
     history = next(d for d in data if "rul" in d.columns)
@@ -240,7 +270,9 @@ def test_app_renders_rul_chart_with_band_and_thresholds_plus_four_sensors(app_te
     limits = next(d for d in data if "label" in d.columns)
     assert limits["value"].tolist() == [20.0, 50.0]
 
-    at.number_input[1].set_value(60.0).run()  # thresholds in the chart follow the sidebar
+    at.number_input(key="warning").set_value(
+        60.0
+    ).run()  # thresholds in the chart follow the sidebar
     _, data = chart_layers_and_data(at.get("vega_lite_chart")[0])
     assert next(d for d in data if "label" in d.columns)["value"].tolist() == [20.0, 60.0]
 
@@ -281,3 +313,26 @@ def test_rul_tooltips_use_one_decimal(app_test) -> None:
     for tooltip in tooltips:
         formats = {t["field"]: t.get("format") for t in tooltip}
         assert formats == {"cycle": None, "rul": ".1f", "lower": ".1f", "upper": ".1f"}
+
+
+def test_app_drift_section_table_histogram_and_caveat(app_test) -> None:
+    at = app_test.run()
+    assert not at.exception
+    drift = at.dataframe[1].value
+    assert drift["column"].tolist() == ["s_11", "s_4", "setting_1"]  # highest PSI first
+    assert drift["status"].tolist() == ["significant", "moderate", "stable"]
+    assert any("degradation" in w.value for w in at.warning)
+    charts = at.get("vega_lite_chart")
+    assert len(charts) == 6  # RUL + 4 sensors + drift histogram
+    marks, data = chart_layers_and_data(charts[5])
+    hist = data[0]
+    assert set(hist["source"]) == {"reference", "current"}
+    assert hist[hist["source"] == "current"]["share"].tolist() == [0.05, 0.25, 0.7]  # s_11 default
+
+
+def test_app_drift_section_explains_missing_profile(app_test, monkeypatch) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "DRIFT", None)
+    at = app_test.run()
+    assert not at.exception
+    assert any("Drift monitoring is unavailable" in i.value for i in at.info)
+    assert len(at.dataframe) == 1  # the fleet table is still shown

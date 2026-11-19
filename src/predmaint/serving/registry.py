@@ -12,10 +12,12 @@ Either way, the predictor is pickled, so the ``predmaint`` package (same version
 importable wherever the model is loaded, e.g. inside the serving Docker image.
 """
 
+import tempfile
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.metadata import version
+from pathlib import Path
 from typing import Any
 
 import mlflow
@@ -23,10 +25,12 @@ import mlflow.pyfunc
 import pandas as pd
 from mlflow.tracking import MlflowClient
 
+from predmaint.monitoring.drift import ReferenceProfile
 from predmaint.serving.predictor import RULPredictor
 from predmaint.tracking import ARTIFACT_ROOT, TRACKING_URI, _get_or_create_experiment, git_tags
 
 MODEL_NAME = "rul-lgbm-fd001"
+PROFILE_ARTIFACT = "reference_profile"
 CHAMPION_ALIAS = "champion"
 RUNTIME_PACKAGES = ("lightgbm", "numpy", "pandas", "scikit-learn")
 
@@ -36,6 +40,18 @@ class RULPyfuncModel(mlflow.pyfunc.PythonModel):
 
     def __init__(self, predictor: RULPredictor) -> None:
         self.predictor = predictor
+        self.reference_profile: ReferenceProfile | None = None
+
+    def load_context(self, context: Any) -> None:
+        """Read the drift reference profile shipped with this model version (if any).
+
+        Models registered before drift monitoring existed have no such artifact; they still
+        load, with ``reference_profile = None``.
+        """
+        path = (context.artifacts or {}).get(PROFILE_ARTIFACT)
+        self.reference_profile = (
+            ReferenceProfile.from_json(Path(path).read_text()) if path else None
+        )
 
     def predict(
         self, context: Any, model_input: pd.DataFrame, params: dict[str, Any] | None = None
@@ -59,6 +75,7 @@ def _tracking_uri(uri: str) -> Iterator[None]:
 def register_champion(
     predictor: RULPredictor,
     *,
+    reference_profile: ReferenceProfile | None = None,
     model_name: str = MODEL_NAME,
     alias: str = CHAMPION_ALIAS,
     params: Mapping[str, object] | None = None,
@@ -68,6 +85,9 @@ def register_champion(
     artifact_location: str = ARTIFACT_ROOT,
 ) -> str:
     """Log ``predictor`` as a pyfunc model, register a new version and point ``alias`` at it.
+
+    The drift ``reference_profile`` is stored as a JSON artifact **inside the model**, so it
+    belongs to exactly this model version and can be read in the MLflow UI.
 
     Returns:
         The new registered model version (as a string).
@@ -81,14 +101,21 @@ def register_champion(
             mlflow.set_tags({**git_tags(), "stage": "build_model"})
             mlflow.log_params(dict(params or {}))
             mlflow.log_metrics({k: float(v) for k, v in (metrics or {}).items()})
-            info = mlflow.pyfunc.log_model(
-                name="model",
-                python_model=RULPyfuncModel(predictor),
-                registered_model_name=model_name,
-                # Pinned explicitly so MLflow does not try to infer requirements by importing
-                # and probing the model; predmaint itself must be installed separately.
-                pip_requirements=[f"{p}=={version(p)}" for p in RUNTIME_PACKAGES],
-            )
+            with tempfile.TemporaryDirectory() as tmp:
+                artifacts = {}
+                if reference_profile is not None:
+                    profile_path = Path(tmp) / "reference_profile.json"
+                    profile_path.write_text(reference_profile.to_json())
+                    artifacts[PROFILE_ARTIFACT] = str(profile_path)
+                info = mlflow.pyfunc.log_model(  # copies the artifact into the model
+                    name="model",
+                    python_model=RULPyfuncModel(predictor),
+                    artifacts=artifacts or None,
+                    registered_model_name=model_name,
+                    # Pinned explicitly so MLflow does not try to infer requirements by
+                    # importing and probing the model; predmaint must be installed separately.
+                    pip_requirements=[f"{p}=={version(p)}" for p in RUNTIME_PACKAGES],
+                )
         model_version = str(info.registered_model_version)
         client.set_registered_model_alias(model_name, alias, model_version)
     return model_version
@@ -101,6 +128,7 @@ class LoadedModel:
     predictor: RULPredictor
     name: str
     version: str
+    reference_profile: ReferenceProfile | None = None  # None for models without drift profile
 
 
 def load_champion_info(
@@ -115,7 +143,13 @@ def load_champion_info(
     model_version = str(client.get_model_version_by_alias(model_name, alias).version)
     with _tracking_uri(tracking_uri):
         pyfunc_model = mlflow.pyfunc.load_model(f"models:/{model_name}/{model_version}")
-    return LoadedModel(pyfunc_model.unwrap_python_model().predictor, model_name, model_version)
+    wrapper = pyfunc_model.unwrap_python_model()
+    return LoadedModel(
+        wrapper.predictor,
+        model_name,
+        model_version,
+        getattr(wrapper, "reference_profile", None),
+    )
 
 
 def load_champion(

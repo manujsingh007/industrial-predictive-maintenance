@@ -131,3 +131,51 @@ def prediction_history(predictions: Iterable[Mapping]) -> pd.DataFrame:
         return df[["cycle", "rul", "lower", "upper"]]
     df = df.sort_values(["cycle", "created_at", "id"]).drop_duplicates("cycle", keep="last")
     return df[["cycle", "rul", "lower", "upper"]].reset_index(drop=True)
+
+
+# --- data drift ------------------------------------------------------------------------------
+
+DRIFT_LABELS = {"stable": "✓ Stable", "moderate": "▲ Moderate", "significant": "● Significant"}
+DRIFT_COLOURS = {
+    "stable": STATUS_COLOURS["ok"],
+    "moderate": STATUS_COLOURS["warning"],
+    "significant": STATUS_COLOURS["critical"],
+}
+DRIFT_COLUMNS = ["column", "kind", "PSI", "status", "readings"]
+
+
+def drift_table(report: Mapping) -> pd.DataFrame:
+    """One row per monitored column, highest PSI first. ``kind`` separates operating settings
+    (a clearer drift signal) from sensors (also shifted by normal degradation)."""
+    rows = [
+        {
+            "column": c["column"],
+            "kind": "setting" if c["column"].startswith("setting") else "sensor",
+            "PSI": c["psi"],
+            "status": c["status"],
+            "readings": c["n_current"],
+        }
+        for c in report.get("columns", [])
+    ]
+    table = pd.DataFrame(rows, columns=DRIFT_COLUMNS)
+    return table.sort_values(["PSI", "column"], ascending=[False, True]).reset_index(drop=True)
+
+
+def bin_labels(edges: Iterable[float]) -> list[str]:
+    """Readable labels for the bins defined by inner ``edges``: "< a", "a – b", ..., "≥ z"."""
+    e = [f"{x:.4g}" for x in edges]
+    if not e:
+        return ["all values"]
+    return [f"< {e[0]}", *(f"{a} – {b}" for a, b in zip(e, e[1:], strict=False)), f"≥ {e[-1]}"]
+
+
+def histogram_frame(column_drift: Mapping) -> pd.DataFrame:
+    """Long table for a grouped bar chart: bin, order, source ("reference"/"current"), share."""
+    labels = bin_labels(column_drift["bin_edges"])
+    rows = []
+    for source, key in (("reference", "reference_shares"), ("current", "current_shares")):
+        rows += [
+            {"bin": label, "order": i, "source": source, "share": share}
+            for i, (label, share) in enumerate(zip(labels, column_drift[key], strict=True))
+        ]
+    return pd.DataFrame(rows, columns=["bin", "order", "source", "share"])

@@ -19,11 +19,15 @@ import streamlit as st
 from predmaint.dashboard.client import ApiClient, ApiError
 from predmaint.dashboard.logic import (
     DEFAULT_THRESHOLDS,
+    DRIFT_COLOURS,
+    DRIFT_LABELS,
     STATUS_COLOURS,
     STATUS_LABELS,
     RiskThresholds,
+    drift_table,
     fleet_kpis,
     fleet_table,
+    histogram_frame,
     prediction_history,
 )
 
@@ -38,10 +42,18 @@ with st.sidebar:
     st.header("Settings")
     st.caption(f"API: `{client.base_url}`")
     critical = st.number_input(
-        "Critical if lower bound <", min_value=0.0, value=DEFAULT_THRESHOLDS.critical, step=5.0
+        "Critical if lower bound <",
+        min_value=0.0,
+        value=DEFAULT_THRESHOLDS.critical,
+        step=5.0,
+        key="critical",
     )
     warning = st.number_input(
-        "Warning if lower bound <", min_value=0.0, value=DEFAULT_THRESHOLDS.warning, step=5.0
+        "Warning if lower bound <",
+        min_value=0.0,
+        value=DEFAULT_THRESHOLDS.warning,
+        step=5.0,
+        key="warning",
     )
     st.button("Refresh", type="primary", width="stretch")  # any click re-runs the page
     st.caption(
@@ -191,3 +203,70 @@ else:
 st.caption(
     "No true RUL is shown: an operator would not know it, and the service never receives it."
 )
+
+# --- data drift ----------------------------------------------------------------------------
+st.subheader("Data drift")
+last_n = st.number_input(
+    "Most recent readings per unit", min_value=1, max_value=1000, value=30, step=10, key="drift_n"
+)
+try:
+    report = client.drift(int(last_n))
+except ApiError as exc:
+    st.info(f"Drift monitoring is unavailable: {exc}")
+    st.stop()
+
+drift = drift_table(report)
+st.caption(
+    f"PSI of the {report['n_readings']} most recent readings ({int(last_n)} per unit, "
+    f"{report['n_units']} units) against the {report['reference_rows']} training readings of "
+    f"model v{report['model_version']}. Stable < 0.1 ≤ moderate < 0.25 ≤ significant."
+)
+
+
+def _drift_style(column: pd.Series) -> list[str]:
+    text = {"moderate": "#1a1a19"}
+    return [
+        f"background-color: {DRIFT_COLOURS[s]}; color: {text.get(s, '#ffffff')}; font-weight: 600"
+        for s in column
+    ]
+
+
+st.dataframe(
+    drift.style.apply(_drift_style, subset=["status"]).format(
+        {"PSI": "{:.3f}", "status": lambda s: DRIFT_LABELS[s]}
+    ),
+    hide_index=True,
+    width="stretch",
+)
+st.warning(
+    "**Read sensor drift with care.** " + report["caveat"],
+    icon="⚠️",
+)
+
+if not drift.empty:
+    chosen = st.selectbox("Column", options=drift["column"].tolist())
+    column_drift = next(c for c in report["columns"] if c["column"] == chosen)
+    hist = histogram_frame(column_drift)
+    bars = (
+        alt.Chart(hist)
+        .mark_bar()
+        .encode(
+            x=alt.X(
+                "bin:N", sort=alt.SortField("order"), title=f"{chosen} (reference decile bins)"
+            ),
+            xOffset=alt.XOffset("source:N", sort=["reference", "current"]),
+            y=alt.Y("share:Q", title="share of readings", axis=alt.Axis(format="%")),
+            color=alt.Color(
+                "source:N",
+                scale=alt.Scale(domain=["reference", "current"], range=["#8a8984", BLUE]),
+                legend=alt.Legend(title=None, orient="top"),
+            ),
+            tooltip=["bin:N", "source:N", alt.Tooltip("share:Q", format=".1%")],
+        )
+        .properties(
+            height=260,
+            title=f"{chosen}: PSI {column_drift['psi']:.3f} "
+            f"({DRIFT_LABELS[column_drift['status']]})",
+        )
+    )
+    st.altair_chart(bars, width="stretch")

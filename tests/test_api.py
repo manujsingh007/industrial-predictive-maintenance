@@ -404,3 +404,68 @@ def test_store_readings_reports_already_stored_and_maps_conflicts_to_409(repo_cl
     r = client.post("/units/8/readings", json=body)
     assert r.status_code == 409
     assert "different readings for 2 cycle(s): [2, 3]" in r.json()["detail"]
+
+
+# --- GET /monitoring/drift (fake repository, no database) ------------------------------------
+
+
+def drift_client(fake: FakePredictor, profile, recent: pd.DataFrame):
+    repo = FakeRepository()
+    repo.recent_readings = lambda last_n: recent
+    app = create_app(lambda: LoadedModel(fake, "rul-lgbm-fd001", "2", profile))
+    app.dependency_overrides[get_repository] = lambda: repo
+    return TestClient(app)
+
+
+@pytest.fixture
+def profile():
+    from predmaint.monitoring.drift import build_reference_profile
+
+    rng = np.random.default_rng(0)
+    train = pd.DataFrame({c: rng.normal(100, 1, 5_000) for c in [*SETTING_COLUMNS, "s_11"]})
+    return build_reference_profile(train, [*SETTING_COLUMNS, "s_11"])
+
+
+def recent_frame(shift: float = 0.0, n_units: int = 4, per_unit: int = 30) -> pd.DataFrame:
+    rng = np.random.default_rng(1)
+    n = n_units * per_unit
+    frame = pd.DataFrame({c: rng.normal(100, 1, n) for c in [*SETTING_COLUMNS, "s_11"]})
+    frame["s_11"] += shift
+    frame.insert(0, "unit", np.repeat(np.arange(1, n_units + 1), per_unit))
+    frame.insert(1, "cycle", np.tile(np.arange(1, per_unit + 1), n_units))
+    return frame
+
+
+def test_drift_report_flags_the_shifted_column(fake: FakePredictor, profile) -> None:
+    with drift_client(fake, profile, recent_frame(shift=1.0)) as c:
+        r = c.get("/monitoring/drift?last_n_cycles=30")
+    assert r.status_code == 200
+    body = r.json()
+    assert (body["n_units"], body["n_readings"], body["model_version"]) == (4, 120, "2")
+    assert body["reference_rows"] == 5_000 and "degradation" in body["caveat"]
+    by_column = {col["column"]: col for col in body["columns"]}
+    assert by_column["s_11"]["status"] == "significant" and by_column["s_11"]["psi"] > 0.25
+    assert all(by_column[s]["status"] != "significant" for s in SETTING_COLUMNS)
+    assert set(by_column["s_11"]) == {
+        "column",
+        "psi",
+        "status",
+        "n_current",
+        "bin_edges",
+        "reference_shares",
+        "current_shares",
+    }
+    assert by_column["s_11"]["n_current"] == 120
+
+
+def test_drift_needs_a_profile_readings_and_valid_window(fake: FakePredictor, profile) -> None:
+    with drift_client(fake, None, recent_frame()) as c:  # e.g. champion built before drift
+        r = c.get("/monitoring/drift")
+        assert r.status_code == 503 and "build_model" in r.json()["detail"]
+    with drift_client(fake, profile, recent_frame().iloc[0:0]) as c:
+        assert c.get("/monitoring/drift").status_code == 404
+        assert c.get("/monitoring/drift?last_n_cycles=0").status_code == 422
+
+
+def test_drift_is_503_without_database(client: TestClient) -> None:
+    assert client.get("/monitoring/drift").status_code == 503

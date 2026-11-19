@@ -306,3 +306,39 @@ def test_concurrent_identical_insert_is_resolved_as_no_op(schema_url: str) -> No
     engine.dispose()
     assert (result.stored, result.already_stored) == (0, 3)
     assert calls["n"] == 2  # looked again after the unique-constraint violation
+
+
+# --- drift monitoring against PostgreSQL -------------------------------------------------
+
+
+def test_recent_readings_takes_each_units_last_n_cycles(
+    client: TestClient, schema_url: str
+) -> None:
+    client.post("/units/40/readings", json=readings(range(1, 51)))
+    client.post("/units/41/readings", json=readings(range(1, 8)))  # shorter than the window
+    engine = create_engine(schema_url)
+    with Session(engine) as session:
+        recent = repository.recent_readings(session, 30)
+    engine.dispose()
+    assert sorted(recent[recent["unit"] == 40]["cycle"]) == list(range(21, 51))
+    assert sorted(recent[recent["unit"] == 41]["cycle"]) == list(range(1, 8))
+    assert {"unit", "cycle", "setting_1", "s_21"} <= set(recent.columns) and len(recent) == 37
+
+
+def test_drift_endpoint_with_stored_readings(predictor, schema_url: str) -> None:
+    from predmaint.monitoring.drift import MONITORED_COLUMNS, build_reference_profile
+    from predmaint.serving.api import create_app
+    from predmaint.serving.registry import LoadedModel
+
+    base = pd.DataFrame([reading(c, drift=0.05) for c in range(1, 201)])
+    profile = build_reference_profile(base, MONITORED_COLUMNS)
+    app = create_app(lambda: LoadedModel(predictor, "m", "3", profile), database_url=schema_url)
+    with TestClient(app) as c:
+        c.post("/units/50/readings", json=readings(range(1, 201), drift=0.05))  # same as reference
+        body = c.get("/monitoring/drift?last_n_cycles=200").json()
+        assert body["n_units"] == 1 and body["n_readings"] == 200 and body["model_version"] == "3"
+        assert {col["column"] for col in body["columns"]} == set(MONITORED_COLUMNS)
+        assert all(col["psi"] < 0.01 for col in body["columns"])  # identical -> ~0
+        last_30 = c.get("/monitoring/drift?last_n_cycles=30").json()
+    assert last_30["n_readings"] == 30
+    assert max(col["psi"] for col in last_30["columns"]) > 0.25  # only late cycles -> shifted

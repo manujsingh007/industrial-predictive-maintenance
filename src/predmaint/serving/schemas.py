@@ -177,3 +177,27 @@ class StoredReading(SensorReading):
 
     unit_id: int
     ingested_at: datetime
+
+
+class ColumnDrift(BaseModel):
+    """PSI of one monitored column, with the bins for a reference-vs-current histogram."""
+
+    column: str
+    psi: float
+    status: str = Field(description='"stable" (< 0.1), "moderate" (< 0.25) or "significant"')
+    n_current: int = Field(description="Current readings the PSI is based on")
+    bin_edges: list[float] = Field(description="Inner bin edges (reference deciles)")
+    reference_shares: list[float]
+    current_shares: list[float]
+
+
+class DriftReport(BaseModel):
+    """Data drift of the fleet's most recent readings against the model's training data."""
+
+    last_n_cycles: int
+    n_units: int
+    n_readings: int
+    model_version: str
+    reference_rows: int = Field(description="Training readings in the reference profile")
+    caveat: str
+    columns: list[ColumnDrift]
