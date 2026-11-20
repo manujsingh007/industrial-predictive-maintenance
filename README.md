@@ -53,18 +53,29 @@ simulated C-MAPSS dataset ([dataset documentation](docs/dataset.md)).
   - FastAPI service: `/health`, `/predict` (stateless), `/units/{id}/readings`,
     `/units/{id}/prediction`, `/units/{id}/predictions`
   - PostgreSQL storage with Alembic migrations and a UNIQUE(unit, cycle) constraint
-  - Replay simulator that streams test engines into the service (resumable)
+  - Replay simulator that streams test engines into the service
+  - Idempotent ingestion: identical re-sends are no-ops, and conflicting values are rejected
+    with 409
   - Integration tests against PostgreSQL, also run in CI
   - **No training/serving skew:** for test engine 3, the live service reproduces the final-test
     prediction exactly (RUL 39.33 at cycle 126, interval 23.36–55.30)
+- [x] **Milestone 6: dashboard and monitoring**
+  - Streamlit dashboard that talks only to the API:
+    - a fleet view ranked by the interval's lower bound;
+    - a per-engine drill-down with 90% prediction intervals and sensor trends;
+    - alerts: critical when the lower bound is below 20 cycles, warning below 50.
+  - **Alert check on the 100 FD001 test engines:** every engine with true RUL ≤ 20 (16 of 16)
+    was flagged critical, and all 21 critical alerts were within 29 cycles of failure.
+  - Drift monitoring with PSI, validated by fault injection
+    ([ADR 0004](docs/adr/0004-drift-monitoring.md))
 
-**Next: Milestone 6**
+**Next: Milestone 7**
 
-- [ ] Streamlit dashboard:
-  - a fleet view ranked by risk;
-  - a per-engine drill-down with prediction intervals;
-  - alerts.
-- [x] Drift monitoring ([ADR 0004](docs/adr/0004-drift-monitoring.md)).
+- [ ] Docker images for the API and the dashboard
+- [ ] One-command `docker compose up` for the full stack
+- [ ] Architecture diagram
+- [ ] Screenshots
+- [ ] Model card
 
 Later: failure prediction and anomaly detection.
 
