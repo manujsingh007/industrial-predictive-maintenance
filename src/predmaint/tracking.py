@@ -14,20 +14,21 @@ from pathlib import Path
 from mlflow.entities import Metric, Param, RunTag
 from mlflow.tracking import MlflowClient
 
-from predmaint.data.download import PROJECT_ROOT
+from predmaint import config
 from predmaint.training.cv import CVResult
 
-TRACKING_DB = PROJECT_ROOT / "mlflow.db"
-TRACKING_URI = f"sqlite:///{TRACKING_DB}"
-ARTIFACT_ROOT = (PROJECT_ROOT / "mlruns").as_uri()
+TRACKING_URI = config.tracking_uri()
+TRACKING_DB = config.sqlite_path(TRACKING_URI)  # None for non-SQLite backends
+ARTIFACT_ROOT = config.artifact_root()
 
 
-def git_tags(repo_dir: Path = PROJECT_ROOT) -> dict[str, str]:
+def git_tags(repo_dir: Path | None = None) -> dict[str, str]:
     """Return ``git_commit`` (HEAD hash) and ``git_dirty`` ("true"/"false") for ``repo_dir``.
 
     "Dirty" means uncommitted changes or untracked files, so the run may not be reproducible
     from the commit alone. Falls back to "unknown" if git is unavailable.
     """
+    repo_dir = repo_dir or config.project_root()
     try:
         commit = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=repo_dir, capture_output=True, text=True, check=True

@@ -2,7 +2,7 @@
 
 Run: ``uv run --group dashboard streamlit run src/predmaint/dashboard/app.py``
 
-It talks **only** to the RUL API (``PREDMAINT_API_URL``, default http://127.0.0.1:8000), never
+It talks **only** to the RUL API (``API_BASE_URL``, default http://127.0.0.1:8000), never
 to the database or data files.
 
 **No true RUL anywhere.** The dashboard shows only what a real operator would have: stored

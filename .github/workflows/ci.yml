@@ -65,3 +65,20 @@ jobs:
       # Separate process: PyTorch and LightGBM must not be loaded together (tests_deep/README.md).
       - name: Run deep-learning tests
         run: uv run --group deep pytest tests_deep
+
+  # Builds both Docker images (no push) so a broken Dockerfile or lockfile fails CI.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build API image (target app)
+        run: docker build --file docker/Dockerfile --target app --tag predmaint-app:ci .
+
+      - name: Build dashboard image (target dashboard)
+        run: docker build --file docker/Dockerfile --target dashboard --tag predmaint-dashboard:ci .
+
+      - name: Smoke-test the images
+        run: |
+          docker run --rm predmaint-app:ci python -c "import lightgbm, predmaint.serving.api"
+          docker run --rm predmaint-dashboard:ci python -c "import streamlit, predmaint.dashboard.logic"

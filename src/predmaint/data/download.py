@@ -16,6 +16,8 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+from predmaint import config
+
 logger = logging.getLogger(__name__)
 
 # Official NASA Prognostics Center of Excellence (PCoE) download, linked from
@@ -27,10 +29,8 @@ DATASET_URL = "https://phm-datasets.s3.amazonaws.com/NASA/6.+Turbofan+Engine+Deg
 # (12,429,152 bytes, Last-Modified 2022-09-18).
 EXPECTED_SHA256 = "c9c5dec12a945a82e8bb4446589d7fb3cc057b5e5d81fa1a12e25ee9912ad3b2"
 
-# Anchor to the project root (src/predmaint/data/download.py -> 3 levels up), so the
-# data lands in the same place no matter which directory the code is run from.
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_RAW_DIR = PROJECT_ROOT / "data" / "raw" / "cmapss"
+# <PREDMAINT_DATA_DIR>/raw/cmapss; see predmaint.config for how the location is resolved.
+DEFAULT_RAW_DIR = config.raw_data_dir()
 ARCHIVE_NAME = "cmapss.zip"
 
 SUBSETS = ("FD001", "FD002", "FD003", "FD004")

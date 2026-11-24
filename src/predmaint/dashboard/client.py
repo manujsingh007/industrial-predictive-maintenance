@@ -1,11 +1,9 @@
 """The dashboard's only data source: the RUL API over HTTP (read-only GET requests)."""
 
-import os
-
 import httpx
 
-DEFAULT_API_URL = "http://127.0.0.1:8000"
-API_URL_ENV = "PREDMAINT_API_URL"
+from predmaint import config
+
 TRANSPORT: httpx.BaseTransport | None = None  # tests plug in httpx.MockTransport here
 
 
@@ -14,7 +12,7 @@ class ApiError(RuntimeError):
 
 
 def api_url() -> str:
-    return os.environ.get(API_URL_ENV, DEFAULT_API_URL).rstrip("/")
+    return config.api_base_url()
 
 
 class ApiClient:

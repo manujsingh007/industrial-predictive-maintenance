@@ -121,7 +121,43 @@ uv run python -m predmaint.training.run_conformal --subset FD001 --method all   
 uv run mlflow ui --backend-store-uri sqlite:///mlflow.db    # browse runs at http://127.0.0.1:5000
 ```
 
+## Quickstart with Docker
+
+The whole stack runs with one command: PostgreSQL, migrations, model build, API and dashboard.
+It needs only Docker.
+
+```bash
+git clone https://github.com/manujsingh007/industrial-predictive-maintenance.git
+cd industrial-predictive-maintenance
+cp .env.example .env              # set POSTGRES_PASSWORD (and DATABASE_URL to match)
+docker compose up --build         # API: http://localhost:8000/docs  dashboard: http://localhost:8501
+```
+
+The first start builds the images, downloads the dataset (checksum-verified) and trains and
+registers the model. That takes a few minutes; it took about 3 minutes here, including the
+image build. Later starts reuse everything from Docker volumes and are ready in seconds.
+
+Then stream the 100 FD001 test engines into the service and watch the dashboard fill up:
+
+```bash
+docker compose --profile demo up replay
+```
+
+- **Ports in use?** Set `API_PORT` / `DASHBOARD_PORT` in `.env`.
+- **Stop:** `docker compose down`. All data is kept.
+- **Reset everything:** `docker compose down -v` deletes the volumes, i.e. the stored
+  readings and predictions **and** the trained model. The next `up` starts from scratch.
+- **The replay never overwrites stored readings.** If a unit already holds different values (for
+  example after a drift-injection experiment), it stops with a 409. Reset first, or replay
+  into new ids with `--unit-offset`.
+
+Settings come from environment variables (see `predmaint.config`): `PREDMAINT_DATA_DIR`,
+`MLFLOW_TRACKING_URI`, `PREDMAINT_ARTIFACT_ROOT`, `DATABASE_URL`, and `API_BASE_URL` for the
+dashboard.
+
 ## Quickstart
+
+For local development without Docker.
 
 Requires [uv](https://docs.astral.sh/uv/). It installs Python 3.12 automatically.
 
@@ -171,7 +207,7 @@ uv run --group dashboard streamlit run src/predmaint/dashboard/app.py
 - **No label leakage:** the replay never reads the true-RUL file, so no labels reach the service.
 - **Results:** `GET /units/{id}/predictions` returns a unit's prediction history.
 - **Dashboard:** it reads only from the API. The default is http://127.0.0.1:8000; set
-  `PREDMAINT_API_URL` to use another one.
+  `API_BASE_URL` to use another one.
   - The fleet table ranks units by the **lower bound** of their 90% interval (critical below 20
     cycles, warning below 50; both adjustable in the sidebar).
   - Selecting a unit shows its predicted RUL with the interval band and four key sensors.

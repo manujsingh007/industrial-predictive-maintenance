@@ -2,7 +2,7 @@
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from predmaint.data.download import PROJECT_ROOT
+from predmaint import config
 
 
 class DatabaseSettings(BaseSettings):
@@ -12,7 +12,7 @@ class DatabaseSettings(BaseSettings):
     answer 503 and the stateless ``/predict`` still works.
     """
 
-    model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=config.env_file(), extra="ignore")
 
     database_url: str | None = None
 

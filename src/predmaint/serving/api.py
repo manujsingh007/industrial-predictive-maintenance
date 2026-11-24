@@ -13,7 +13,6 @@ http://127.0.0.1:8000/docs.
 """
 
 import logging
-import os
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -61,7 +60,7 @@ def load_from_registry() -> LoadedModel:
     from predmaint.serving.registry import load_champion_info
     from predmaint.tracking import TRACKING_URI
 
-    return load_champion_info(tracking_uri=os.environ.get("MLFLOW_TRACKING_URI", TRACKING_URI))
+    return load_champion_info(tracking_uri=TRACKING_URI)  # MLFLOW_TRACKING_URI or default
 
 
 def get_model(request: Request) -> LoadedModel:

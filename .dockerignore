@@ -1,0 +1,34 @@
+# Keep the build context small and free of local state and secrets.
+# The images get only pyproject.toml, uv.lock, README.md, alembic.ini and src/.
+
+# Environments and caches
+.venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.ruff_cache
+.ipynb_checkpoints
+.coverage
+
+# Local data and ML state (the containers download/build their own into a volume)
+data
+mlruns
+mlartifacts
+mlflow.db
+reports
+models
+
+# Secrets: credentials reach containers only through docker-compose environment variables
+.env
+
+# Not needed in the images
+.git
+.github
+notebooks
+tests
+tests_deep
+docs
+docker-compose.yml
+docker/Dockerfile
+.vscode
+.DS_Store

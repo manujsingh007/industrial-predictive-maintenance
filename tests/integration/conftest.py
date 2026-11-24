@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
-from predmaint.data.download import PROJECT_ROOT
+from predmaint import config
 from predmaint.data.load import SENSOR_COLUMNS
 from predmaint.db.settings import get_database_url
 from predmaint.features.selection import KEPT_SENSORS
@@ -38,7 +38,7 @@ def base_url() -> str:
 
 
 def alembic_config() -> Config:
-    cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
+    cfg = Config(str(config.project_root() / "alembic.ini"))
     cfg.attributes["configure_logger"] = False
     return cfg
 

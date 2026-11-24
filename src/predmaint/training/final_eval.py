@@ -33,7 +33,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from predmaint.data.download import PROJECT_ROOT
+from predmaint import config
 from predmaint.data.load import add_rul, load_test, load_test_rul, load_train
 from predmaint.evaluation.metrics import (
     bootstrap_ci,
@@ -56,7 +56,7 @@ from predmaint.models.gbdt import make_lgbm
 from predmaint.training.cv import MAX_EVAL_RUL, cross_validate
 from predmaint.training.run_cv import DEFAULT_WINDOWS, N_SPLITS, SEED, build_features
 
-REPORTS_DIR = PROJECT_ROOT / "reports"
+REPORTS_DIR = config.reports_dir()
 ALPHA = 0.1
 N_RESAMPLES = 10_000
 BOOTSTRAP_SEED = 42

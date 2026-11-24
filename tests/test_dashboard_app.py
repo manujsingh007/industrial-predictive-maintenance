@@ -191,9 +191,9 @@ def test_error_responses_carry_the_api_detail(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_api_url_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PREDMAINT_API_URL", "http://example:9000/")
+    monkeypatch.setenv("API_BASE_URL", "http://example:9000/")
     assert client_module.api_url() == "http://example:9000"
-    monkeypatch.delenv("PREDMAINT_API_URL")
+    monkeypatch.delenv("API_BASE_URL")
     assert client_module.api_url() == "http://127.0.0.1:8000"
 
 
