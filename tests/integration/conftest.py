@@ -33,7 +33,7 @@ from predmaint.training.run_cv import build_features
 def base_url() -> str:
     url = get_database_url()
     if not url:
-        pytest.fail("DATABASE_URL is not set: start PostgreSQL (docker compose up -d) and set it")
+        pytest.fail("DATABASE_URL is not set: run `docker compose up -d postgres` and set it")
     return url
 
 

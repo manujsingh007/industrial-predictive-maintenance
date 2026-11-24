@@ -21,6 +21,84 @@ simulated C-MAPSS dataset ([dataset documentation](docs/dataset.md)).
 > The test set was sealed until a single final run, after every modelling decision had been
 > frozen. Full results: [reports/final_test_fd001.md](reports/final_test_fd001.md).
 
+Model card: [docs/model_card.md](docs/model_card.md) (intended use, limitations and safety).
+
+## Screenshots
+
+![Fleet view of the dashboard: 100 units, 21 critical and 18 warnings, ranked by lower bound](docs/images/dashboard-fleet.png)
+
+*Fleet view: units ranked by the lower bound of their 90% interval, scrolled to where critical
+turns into warning.*
+
+![Predicted RUL of engine 3 over its cycles, with the 90% interval as a shaded band](docs/images/dashboard-engine-3.png)
+
+*Engine 3: predicted RUL with its 90% interval. This is one of the 7 of 100 misses: the true RUL
+was 69, above the interval (23–55), so the error is on the early, safe side.*
+
+![Data drift table of the dashboard: every listed column is stable](docs/images/dashboard-drift.png)
+
+*Data drift: PSI per column for the 100 replayed test engines, with no injected fault.*
+
+## Architecture
+
+```mermaid
+flowchart LR
+    data["NASA C-MAPSS<br/>FD001"] --> train["Training pipeline<br/>features, LightGBM,<br/>interval calibration"]
+    train -->|"registers model +<br/>drift reference profile"| registry[("MLflow registry<br/>rul-lgbm-fd001<br/>@champion")]
+    registry -->|"loaded once<br/>at startup"| api["FastAPI service"]
+    replay["Replay simulator"] -->|"POST readings,<br/>GET prediction"| api
+    api <-->|"readings,<br/>predictions"| db[("PostgreSQL")]
+    dashboard["Streamlit dashboard"] -->|"GET only"| api
+```
+
+The drift reference profile is a JSON file inside each registered model version, so drift is
+always measured against the data that version was trained on.
+
+Docker Compose start order:
+
+```mermaid
+flowchart LR
+    postgres[("postgres")] -->|healthy| migrate["migrate<br/>(one-shot)"]
+    migrate -->|completed| api["api"]
+    model["model<br/>(one-shot)"] -->|completed| api
+    api -->|healthy| dashboard["dashboard"]
+    api -.->|"healthy, demo profile"| replay["replay"]
+```
+
+## Quickstart with Docker
+
+The whole stack runs with one command: PostgreSQL, migrations, model build, API and dashboard.
+It needs only Docker.
+
+```bash
+git clone https://github.com/manujsingh007/industrial-predictive-maintenance.git
+cd industrial-predictive-maintenance
+cp .env.example .env              # set POSTGRES_PASSWORD (and DATABASE_URL to match)
+docker compose up --build         # API: http://localhost:8000/docs  dashboard: http://localhost:8501
+```
+
+The first start builds the images, downloads the dataset (checksum-verified) and trains and
+registers the model. That takes a few minutes; it took about 3 minutes here, including the
+image build. Later starts reuse everything from Docker volumes and are ready in seconds.
+
+Then stream the 100 FD001 test engines into the service and watch the dashboard fill up:
+
+```bash
+docker compose --profile demo up replay
+```
+
+- **Ports in use?** Set `API_PORT` / `DASHBOARD_PORT` in `.env`.
+- **Stop:** `docker compose down`. All data is kept.
+- **Reset everything:** `docker compose down -v` deletes the volumes, i.e. the stored
+  readings and predictions **and** the trained model. The next `up` starts from scratch.
+- **The replay never overwrites stored readings.** If a unit already holds different values (for
+  example after a drift-injection experiment), it stops with a 409. Reset first, or replay
+  into new ids with `--unit-offset`.
+
+Settings come from environment variables (see `predmaint.config`): `PREDMAINT_DATA_DIR`,
+`MLFLOW_TRACKING_URI`, `PREDMAINT_ARTIFACT_ROOT`, `DATABASE_URL`, and `API_BASE_URL` for the
+dashboard.
+
 ## Status
 
 **Done**
@@ -68,14 +146,11 @@ simulated C-MAPSS dataset ([dataset documentation](docs/dataset.md)).
     was flagged critical, and all 21 critical alerts were within 29 cycles of failure.
   - Drift monitoring with PSI, validated by fault injection
     ([ADR 0004](docs/adr/0004-drift-monitoring.md))
-
-**Next: Milestone 7**
-
-- [ ] Docker images for the API and the dashboard
-- [ ] One-command `docker compose up` for the full stack
-- [ ] Architecture diagram
-- [ ] Screenshots
-- [ ] Model card
+- [x] **Milestone 7: deployment and documentation**
+  - Docker images for the API and the dashboard, built and smoke-tested in CI
+  - One-command `docker compose up` for the full stack
+  - Architecture diagram and screenshots
+  - [Model card](docs/model_card.md)
 
 Later: failure prediction and anomaly detection.
 
@@ -112,7 +187,7 @@ and limitations.
 
 ### Reproduce
 
-After the Quickstart below:
+After the [local development](#local-development) setup below:
 
 ```bash
 uv run python -m predmaint.training.run_baselines --subset FD001                        # baselines
@@ -121,43 +196,9 @@ uv run python -m predmaint.training.run_conformal --subset FD001 --method all   
 uv run mlflow ui --backend-store-uri sqlite:///mlflow.db    # browse runs at http://127.0.0.1:5000
 ```
 
-## Quickstart with Docker
+## Local development
 
-The whole stack runs with one command: PostgreSQL, migrations, model build, API and dashboard.
-It needs only Docker.
-
-```bash
-git clone https://github.com/manujsingh007/industrial-predictive-maintenance.git
-cd industrial-predictive-maintenance
-cp .env.example .env              # set POSTGRES_PASSWORD (and DATABASE_URL to match)
-docker compose up --build         # API: http://localhost:8000/docs  dashboard: http://localhost:8501
-```
-
-The first start builds the images, downloads the dataset (checksum-verified) and trains and
-registers the model. That takes a few minutes; it took about 3 minutes here, including the
-image build. Later starts reuse everything from Docker volumes and are ready in seconds.
-
-Then stream the 100 FD001 test engines into the service and watch the dashboard fill up:
-
-```bash
-docker compose --profile demo up replay
-```
-
-- **Ports in use?** Set `API_PORT` / `DASHBOARD_PORT` in `.env`.
-- **Stop:** `docker compose down`. All data is kept.
-- **Reset everything:** `docker compose down -v` deletes the volumes, i.e. the stored
-  readings and predictions **and** the trained model. The next `up` starts from scratch.
-- **The replay never overwrites stored readings.** If a unit already holds different values (for
-  example after a drift-injection experiment), it stops with a 409. Reset first, or replay
-  into new ids with `--unit-offset`.
-
-Settings come from environment variables (see `predmaint.config`): `PREDMAINT_DATA_DIR`,
-`MLFLOW_TRACKING_URI`, `PREDMAINT_ARTIFACT_ROOT`, `DATABASE_URL`, and `API_BASE_URL` for the
-dashboard.
-
-## Quickstart
-
-For local development without Docker.
+Without Docker.
 
 Requires [uv](https://docs.astral.sh/uv/). It installs Python 3.12 automatically.
 
@@ -173,13 +214,14 @@ uv run pytest                               # run the tests
 
 ## Run the full service locally
 
-Needs Docker (Docker Desktop on macOS) and the Quickstart above. Run each step in its own
+Runs the API and dashboard from source; only PostgreSQL runs in Docker. Needs Docker (Docker
+Desktop on macOS) and the local development setup above. Run each step in its own
 terminal where noted.
 
 ```bash
 # 1. Database: copy the example settings, set a password, then start PostgreSQL
 cp .env.example .env                  # edit POSTGRES_PASSWORD and DATABASE_URL to match
-docker compose up -d                  # wait for "healthy": docker compose ps
+docker compose up -d postgres         # only the database; wait for "healthy": docker compose ps
 
 # 2. Schema: create or upgrade the tables
 uv run alembic upgrade head

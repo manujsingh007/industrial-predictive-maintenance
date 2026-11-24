@@ -56,7 +56,7 @@ testpaths = ["tests"]
 # Integration tests need a running PostgreSQL; they are excluded unless asked for with
 #   uv run pytest -m integration
 addopts = "-ra -m 'not integration'"
-markers = ["integration: needs PostgreSQL at DATABASE_URL (docker compose up -d)"]
+markers = ["integration: needs PostgreSQL at DATABASE_URL (docker compose up -d postgres)"]
 
 # PyTorch: on Linux (CI) use the CPU-only build instead of the much larger CUDA build from
 # PyPI; macOS uses PyPI's build, which supports Apple MPS.

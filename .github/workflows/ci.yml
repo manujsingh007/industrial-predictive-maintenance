@@ -33,10 +33,11 @@ jobs:
       DATABASE_URL: postgresql+psycopg://predmaint:ci-only-password@localhost:5432/predmaint
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        # Full version on purpose: setup-uv publishes no major tags (@v10) since v8.
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
 
@@ -70,7 +71,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build API image (target app)
         run: docker build --file docker/Dockerfile --target app --tag predmaint-app:ci .
