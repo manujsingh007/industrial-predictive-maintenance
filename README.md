@@ -23,6 +23,48 @@ simulated C-MAPSS dataset ([dataset documentation](docs/dataset.md)).
 
 Model card: [docs/model_card.md](docs/model_card.md) (intended use, limitations and safety).
 
+## Live demo
+
+**Link:** _not deployed yet_ <!-- TODO after deploying: replace with https://YOUR-APP.streamlit.app -->
+
+The demo is the real dashboard on a **static snapshot** of the full system's output for the 100
+FD001 test engines ([demo/snapshot](demo/snapshot), 0.65 MB). It has no API, database or model
+behind it and makes no network calls; the banner states the snapshot's date and model version. For
+the live system, use the [Docker quickstart](#quickstart-with-docker).
+
+<details>
+<summary>Deploy it on Streamlit Community Cloud</summary>
+
+1. Push the repository, including `demo/`, to GitHub.
+2. Sign in at [share.streamlit.io](https://share.streamlit.io) with GitHub, click **Create app**, and
+   choose to deploy an app you already have.
+3. Set the repository, the branch `main`, and the main file path **`demo/streamlit_app.py`**.
+4. Open **Advanced settings** and select **Python 3.12**. Leave *Secrets* empty. The Python version
+   cannot be changed later without deleting and redeploying the app.
+5. Click **Deploy**, then put the app's URL in the link above.
+
+**Dependencies.** Community Cloud uses the first dependency file it finds: first in the folder of the
+main file, then in the repository root. In each place `uv.lock` beats `requirements.txt`. That is why
+the demo has its own folder: `demo/requirements.txt` installs only Streamlit, pandas and Altair, while
+the root `uv.lock` would install the whole project (MLflow, LightGBM, database drivers).
+
+**Try it locally:**
+
+```bash
+uv run --group dashboard streamlit run demo/streamlit_app.py
+```
+
+**Refresh the snapshot** from a running stack with replayed engines, then commit `demo/snapshot`:
+
+```bash
+uv run python -m predmaint.demo.export_snapshot
+```
+
+The export refuses to run if the stored predictions were not all made by the loaded model; replay
+into an empty database first.
+
+</details>
+
 ## Screenshots
 
 ![Fleet view of the dashboard: 100 units, 21 critical and 18 warnings, ranked by lower bound](docs/images/dashboard-fleet.png)
@@ -151,6 +193,7 @@ dashboard.
   - One-command `docker compose up` for the full stack
   - Architecture diagram and screenshots
   - [Model card](docs/model_card.md)
+  - Static demo for Streamlit Community Cloud, on a snapshot of the system's output
 
 Later: failure prediction and anomaly detection.
 

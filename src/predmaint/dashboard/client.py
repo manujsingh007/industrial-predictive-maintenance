@@ -1,13 +1,14 @@
-"""The dashboard's only data source: the RUL API over HTTP (read-only GET requests)."""
+"""The dashboard's default data source: the RUL API over HTTP (read-only GET requests)."""
 
 import httpx
 
 from predmaint import config
+from predmaint.dashboard.source import DataSourceError
 
 TRANSPORT: httpx.BaseTransport | None = None  # tests plug in httpx.MockTransport here
 
 
-class ApiError(RuntimeError):
+class ApiError(DataSourceError):
     """The API could not be reached or returned an error; the message is shown to the user."""
 
 
@@ -16,8 +17,12 @@ def api_url() -> str:
 
 
 class ApiClient:
+    snapshot = None  # live data
+    drift_window = None  # any window can be requested
+
     def __init__(self, base_url: str | None = None, timeout: float = 10.0) -> None:
         self.base_url = base_url or api_url()
+        self.label = f"API: `{self.base_url}`"
         self.http = httpx.Client(base_url=self.base_url, timeout=timeout, transport=TRANSPORT)
 
     def _get(self, path: str, **params) -> object:

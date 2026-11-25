@@ -1,0 +1,1 @@
+{"format_version":1,"generated_at":"2026-11-24T13:43:11+00:00","model_name":"rul-lgbm-fd001","model_version":"1","drift_window":30,"n_units":100,"n_readings":13096,"n_predictions":1358}

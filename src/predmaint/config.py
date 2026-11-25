@@ -17,6 +17,7 @@ subfolder of the project find the same data.
 | PREDMAINT_ARTIFACT_ROOT   | <project>/mlruns (path or file:// URI)|
 | DATABASE_URL              | from the environment or <project>/.env|
 | API_BASE_URL (dashboard)  | http://127.0.0.1:8000                 |
+| PREDMAINT_DEMO_SNAPSHOT   | unset: the dashboard uses the API     |
 """
 
 import os
@@ -84,6 +85,16 @@ def artifact_path(uri: str) -> Path | None:
 
 def env_file() -> Path:
     return project_root() / ".env"
+
+
+def demo_snapshot_dir(value: str | None = None) -> Path | None:
+    """Snapshot directory for the dashboard's demo mode, or None for the live API.
+
+    ``PREDMAINT_DEMO_SNAPSHOT`` wins over ``value`` (the Streamlit secret of the same name);
+    relative paths are inside the project directory.
+    """
+    chosen = os.environ.get("PREDMAINT_DEMO_SNAPSHOT") or value
+    return project_root() / Path(chosen).expanduser() if chosen else None
 
 
 def api_base_url() -> str:

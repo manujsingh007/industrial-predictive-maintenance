@@ -1,0 +1,6 @@
+# Only what the static demo imports; same versions as uv.lock (checked by tests/test_demo.py).
+# Community Cloud uses this file because it sits next to demo/streamlit_app.py; a file at the
+# repository root would lose to uv.lock, which installs the whole project.
+altair==6.3.0
+pandas==3.1.1
+streamlit==1.67.0

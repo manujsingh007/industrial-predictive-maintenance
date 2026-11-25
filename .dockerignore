@@ -21,7 +21,8 @@ models
 # Secrets: credentials reach containers only through docker-compose environment variables
 .env
 
-# Not needed in the images
+# Not needed in the images (the root demo/ is the Streamlit Cloud demo, not src/predmaint/demo)
+demo
 .git
 .github
 notebooks

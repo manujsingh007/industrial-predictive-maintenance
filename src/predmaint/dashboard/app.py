@@ -3,7 +3,9 @@
 Run: ``uv run --group dashboard streamlit run src/predmaint/dashboard/app.py``
 
 It talks **only** to the RUL API (``API_BASE_URL``, default http://127.0.0.1:8000), never
-to the database or data files.
+to the database or data files. In demo mode (``PREDMAINT_DEMO_SNAPSHOT`` as an environment
+variable or Streamlit secret) it shows a static snapshot of the API's answers instead, with no
+network access; see ``predmaint.dashboard.source``.
 
 **No true RUL anywhere.** The dashboard shows only what a real operator would have: stored
 readings and the model's predictions. In reality the true RUL is unknown until the engine fails.
@@ -15,8 +17,9 @@ receives labels, so the dashboard cannot show them.
 import altair as alt
 import pandas as pd
 import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 
-from predmaint.dashboard.client import ApiClient, ApiError
+from predmaint import config
 from predmaint.dashboard.logic import (
     DEFAULT_THRESHOLDS,
     DRIFT_COLOURS,
@@ -30,17 +33,31 @@ from predmaint.dashboard.logic import (
     histogram_frame,
     prediction_history,
 )
+from predmaint.dashboard.source import KEY_SENSORS, DataSourceError, make_source
 
-KEY_SENSORS = ["s_11", "s_4", "s_12", "s_7"]  # strongest relation to RUL (notebook 01)
+REPO_URL = "https://github.com/manujsingh007/industrial-predictive-maintenance"
 BLUE = "#2a78d6"
 
 st.set_page_config(page_title="RUL fleet dashboard", page_icon="🛠", layout="wide")
-client = ApiClient()
+
+
+def _snapshot_secret() -> str | None:
+    try:
+        return st.secrets.get("PREDMAINT_DEMO_SNAPSHOT")
+    except StreamlitSecretNotFoundError:  # no secrets file: the normal case
+        return None
+
+
+try:
+    client = make_source(config.demo_snapshot_dir(_snapshot_secret()))
+except DataSourceError as exc:
+    st.error(str(exc))
+    st.stop()
 
 # --- sidebar: connection, thresholds, refresh ------------------------------------------------
 with st.sidebar:
     st.header("Settings")
-    st.caption(f"API: `{client.base_url}`")
+    st.caption(client.label)
     critical = st.number_input(
         "Critical if lower bound <",
         min_value=0.0,
@@ -55,7 +72,8 @@ with st.sidebar:
         step=5.0,
         key="warning",
     )
-    st.button("Refresh", type="primary", width="stretch")  # any click re-runs the page
+    if client.snapshot is None:
+        st.button("Refresh", type="primary", width="stretch")  # any click re-runs the page
     st.caption(
         "Alerts use the **lower bound** of the 90% interval: the true RUL is very likely above "
         "it, so a low lower bound means failure is plausibly near."
@@ -70,11 +88,21 @@ except ValueError:
 try:
     health = client.health()
     units = client.units()
-except ApiError as exc:
+except DataSourceError as exc:
     st.error(str(exc))
     st.stop()
 
 st.title("Turbofan fleet: remaining useful life")
+if client.snapshot is not None:
+    snap = client.snapshot
+    st.info(
+        "**Demo: static snapshot.** This is the full system's output on the NASA C-MAPSS FD001 "
+        f"test engines (simulated), generated on {snap['generated_at'][:10]} with model "
+        f"`{snap['model_name']}` v{snap['model_version']}. Nothing is computed live. "
+        f"[Source code]({REPO_URL}) · "
+        f"[Run the full system with Docker Compose]({REPO_URL}#quickstart-with-docker)",
+        icon="📸",
+    )
 model_info = (
     f"model `{health.get('model_name')}` v{health.get('model_version')}"
     if health.get("status") == "ok"
@@ -137,7 +165,7 @@ unit = st.selectbox(
 try:
     history = prediction_history(client.predictions(unit))
     readings = pd.DataFrame(client.readings(unit))
-except ApiError as exc:
+except DataSourceError as exc:
     st.error(str(exc))
     st.stop()
 
@@ -207,11 +235,17 @@ st.caption(
 # --- data drift ----------------------------------------------------------------------------
 st.subheader("Data drift")
 last_n = st.number_input(
-    "Most recent readings per unit", min_value=1, max_value=1000, value=30, step=10, key="drift_n"
+    "Most recent readings per unit",
+    min_value=1,
+    max_value=1000,
+    value=client.drift_window or 30,
+    step=10,
+    key="drift_n",
+    disabled=client.drift_window is not None,  # a snapshot holds one window only
 )
 try:
     report = client.drift(int(last_n))
-except ApiError as exc:
+except DataSourceError as exc:
     st.info(f"Drift monitoring is unavailable: {exc}")
     st.stop()
 
