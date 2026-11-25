@@ -1,5 +1,7 @@
 # Industrial Predictive Maintenance
 
+**[▶️ Live demo](https://turbofan-rul-demo.streamlit.app)**
+
 [![CI](https://github.com/manujsingh007/industrial-predictive-maintenance/actions/workflows/ci.yml/badge.svg)](https://github.com/manujsingh007/industrial-predictive-maintenance/actions/workflows/ci.yml)
 
 Unplanned failures of industrial equipment are costly and can be unsafe, while replacing parts too
@@ -25,7 +27,7 @@ Model card: [docs/model_card.md](docs/model_card.md) (intended use, limitations 
 
 ## Live demo
 
-**Link:** _not deployed yet_ <!-- TODO after deploying: replace with https://YOUR-APP.streamlit.app -->
+**Link:** <https://turbofan-rul-demo.streamlit.app>
 
 The demo is the real dashboard on a **static snapshot** of the full system's output for the 100
 FD001 test engines ([demo/snapshot](demo/snapshot), 0.65 MB). It has no API, database or model
